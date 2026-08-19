@@ -1,17 +1,25 @@
 import { constants } from "node:fs";
-import { access, appendFile, lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, appendFile, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import ts from "typescript";
 
 export interface GenerationResult {
   readonly created: readonly string[];
   readonly unchanged: readonly string[];
 }
 
+export interface ApplicationScaffoldFileSystem {
+  createDirectory(directory: string): Promise<void>;
+  createFile(file: string, content: string): Promise<void>;
+  removePath(target: string, recursive: boolean): Promise<void>;
+}
+
 const SOURCE_NAME = /^[A-Za-z][A-Za-z0-9_-]*$/;
+const ARTIFACT_SOURCE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
-function words(value: string): string[] {
-  if (!SOURCE_NAME.test(value)) throw new Error(`Invalid name: ${value}`);
+function words(value: string, sourcePattern: RegExp = SOURCE_NAME): string[] {
+  if (!sourcePattern.test(value)) throw new Error(`Invalid name: ${value}`);
   return value
     .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2")
@@ -24,13 +32,22 @@ function kebabCase(value: string): string {
   return words(value).join("-");
 }
 
-function pascalCase(value: string): string {
-  return words(value).map((entry) => entry[0]?.toUpperCase() + entry.slice(1)).join("");
+function pascalCase(value: string, sourcePattern?: RegExp): string {
+  return words(value, sourcePattern).map((entry) => entry[0]?.toUpperCase() + entry.slice(1)).join("");
 }
 
-function camelCase(value: string): string {
-  const pascal = pascalCase(value);
+function camelCase(value: string, sourcePattern?: RegExp): string {
+  const pascal = pascalCase(value, sourcePattern);
   return `${pascal[0]?.toLowerCase() ?? ""}${pascal.slice(1)}`;
+}
+
+function assertGeneratedIdentifier(identifier: string, sourceName: string): void {
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.Standard, identifier);
+  const token = scanner.scan();
+  const isKeyword = token >= ts.SyntaxKind.FirstKeyword && token <= ts.SyntaxKind.LastKeyword;
+  if (token !== ts.SyntaxKind.Identifier || isKeyword || scanner.scan() !== ts.SyntaxKind.EndOfFileToken) {
+    throw new Error(`Invalid generated identifier for name: ${sourceName}`);
+  }
 }
 
 function safeTarget(cwd: string, target: string): string {
@@ -110,21 +127,71 @@ const generatedPackage = {
   },
 };
 
-export async function createApplication(cwd: string, target: string): Promise<GenerationResult> {
+const nodeApplicationScaffoldFileSystem: ApplicationScaffoldFileSystem = {
+  async createDirectory(directory) {
+    await mkdir(directory, { recursive: true });
+  },
+  async createFile(file, content) {
+    await writeFile(file, content, { flag: "wx" });
+  },
+  async removePath(target, recursive) {
+    await rm(target, { recursive, force: true });
+  },
+};
+
+async function rollbackApplicationScaffold(
+  fileSystem: ApplicationScaffoldFileSystem,
+  root: string,
+  rootExisted: boolean,
+  createdFiles: readonly string[],
+  createdSourceDirectory: boolean,
+): Promise<void> {
+  if (!rootExisted) {
+    await fileSystem.removePath(root, true);
+    return;
+  }
+  for (const file of createdFiles) await fileSystem.removePath(file, false);
+  if (createdSourceDirectory) await fileSystem.removePath(path.join(root, "src"), true);
+}
+
+export async function createApplication(
+  cwd: string,
+  target: string,
+  fileSystem: ApplicationScaffoldFileSystem = nodeApplicationScaffoldFileSystem,
+): Promise<GenerationResult> {
   const root = safeTarget(cwd, target);
-  if (await exists(root)) {
+  const rootExisted = await exists(root);
+  if (rootExisted) {
     await assertOrdinaryDirectory(root);
     if ((await readdir(root)).length > 0) throw new Error(`Target directory is not empty: ${target}`);
-  } else {
-    await mkdir(root, { recursive: true });
   }
-  await mkdir(path.join(root, "src", "features"), { recursive: true });
   const files: ReadonlyArray<readonly [string, string]> = [
     ["package.json", `${JSON.stringify(generatedPackage, null, 2)}\n`],
     ["tsconfig.json", `${JSON.stringify(generatedTsconfig, null, 2)}\n`],
     ["src/app.ts", `import { defineApp } from "typescript-on-rails";\n\nexport default defineApp();\n`],
   ];
-  for (const [relative, content] of files) await writeFile(path.join(root, relative), content, { flag: "wx" });
+  const absoluteFiles = files.map(([relative]) => path.join(root, relative));
+  const createdFiles: string[] = [];
+  let createdSourceDirectory = false;
+  try {
+    if (!rootExisted) await fileSystem.createDirectory(root);
+    createdSourceDirectory = true;
+    await fileSystem.createDirectory(path.join(root, "src", "features"));
+    for (let index = 0; index < files.length; index += 1) {
+      const entry = files[index];
+      const file = absoluteFiles[index];
+      if (entry === undefined || file === undefined) continue;
+      createdFiles.push(file);
+      await fileSystem.createFile(file, entry[1]);
+    }
+  } catch (error) {
+    try {
+      await rollbackApplicationScaffold(fileSystem, root, rootExisted, createdFiles, createdSourceDirectory);
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], `Application scaffold failed and rollback was incomplete: ${target}`);
+    }
+    throw error;
+  }
   return { created: files.map(([relative]) => path.join(target, relative)), unchanged: [] };
 }
 
@@ -162,9 +229,18 @@ async function createFeatureArtifact(
   if (!(await exists(target.boundary))) throw new Error(`Feature does not exist: ${target.feature}`);
   await assertOrdinaryDirectory(target.directory);
   const exportName = sourceName;
+  assertGeneratedIdentifier(exportName, sourceName);
   const fileName = `${kebabCase(sourceName)}.ts`;
   const file = path.join(target.directory, fileName);
-  const created = await writeNewFile(file, fileContent(exportName));
+  const expectedContent = fileContent(exportName);
+  const created = await writeNewFile(file, expectedContent);
+  if (!created) {
+    const metadata = await lstat(file);
+    const matches = metadata.isFile()
+      && !metadata.isSymbolicLink()
+      && await readFile(file, "utf8") === expectedContent;
+    if (!matches) throw new Error(`Generated file collision: ${path.relative(root, file)}`);
+  }
   const exportLine = `export { ${exportName} } from "./${fileName.slice(0, -3)}.js";`;
   const exported = await appendPublicExport(target.boundary, exportLine);
   const relative = path.relative(root, file);
@@ -175,7 +251,7 @@ async function createFeatureArtifact(
 }
 
 export async function createModel(root: string, nameInput: string, feature: string): Promise<GenerationResult> {
-  const name = pascalCase(nameInput);
+  const name = pascalCase(nameInput, ARTIFACT_SOURCE_NAME);
   return createFeatureArtifact(root, feature, name, (exportName) => `import { defineModel, id } from "typescript-on-rails";\n\nexport const ${exportName} = defineModel({\n  name: "${exportName}",\n  fields: {\n    id: id("${exportName}"),\n  },\n});\n`);
 }
 
@@ -187,11 +263,11 @@ function operationSource(kind: "action" | "query", exportName: string): string {
 }
 
 export async function createAction(root: string, nameInput: string, feature: string): Promise<GenerationResult> {
-  const name = camelCase(nameInput);
+  const name = camelCase(nameInput, ARTIFACT_SOURCE_NAME);
   return createFeatureArtifact(root, feature, name, (exportName) => operationSource("action", exportName));
 }
 
 export async function createQuery(root: string, nameInput: string, feature: string): Promise<GenerationResult> {
-  const name = camelCase(nameInput);
+  const name = camelCase(nameInput, ARTIFACT_SOURCE_NAME);
   return createFeatureArtifact(root, feature, name, (exportName) => operationSource("query", exportName));
 }

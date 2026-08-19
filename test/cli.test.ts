@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { access, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import ts from "typescript";
 
+import { analyzeApplication } from "../src/features/architecture/index.js";
 import { runCli, type CliDependencies, type CommandInvocation } from "../src/features/tooling/index.js";
+import {
+  createApplication,
+  createGitArchitectureDiff,
+  type ApplicationScaffoldFileSystem,
+} from "../src/infra/project/index.js";
 import { createAppFixture, type AppFixture } from "./helpers/app-fixture.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -103,6 +110,17 @@ describe("app CLI checks and lifecycle", () => {
     assert.deepEqual(JSON.parse(success.stdout), { ok: true, diagnostics: [] });
     assert.deepEqual(calls, [{ command: "npm", args: ["run", "test:app"], cwd: healthy.root }]);
 
+    const failedTests = await invoke(["check", "--json", "--with-tests"], healthy.root, {
+      runCommand: async () => 9,
+    });
+    assert.equal(failedTests.code, 9);
+    assert.equal(failedTests.stderr, "Application tests failed with exit code 9.\n");
+    assert.deepEqual(JSON.parse(failedTests.stdout), {
+      ok: false,
+      diagnostics: [],
+      tests: { ok: false, exitCode: 9 },
+    });
+
     const broken = await fixture({ "src/features/billing/model.ts": `export const count: number = "wrong";` });
     const failure = await invoke(["check"], broken.root);
     assert.equal(failure.code, 1);
@@ -196,6 +214,73 @@ describe("app scaffold and generators", () => {
     assert.match(refused.stderr, /not empty/);
   });
 
+  it("rolls back failed application creation and permits a retry", async () => {
+    const parent = await mkdtemp(path.join(tmpdir(), "tor-new-rollback-"));
+    cleanup.push(() => rm(parent, { recursive: true, force: true }));
+
+    const failOnSecondFile = (): ApplicationScaffoldFileSystem => {
+      let fileCount = 0;
+      return {
+        createDirectory: async (directory) => { await mkdir(directory, { recursive: true }); },
+        createFile: async (file, content) => {
+          fileCount += 1;
+          await writeFile(file, content, { flag: "wx" });
+          if (fileCount === 2) throw new Error("injected scaffold write failure");
+        },
+        removePath: async (target, recursive) => { await rm(target, { recursive, force: true }); },
+      };
+    };
+
+    await assert.rejects(
+      createApplication(parent, "created-root", failOnSecondFile()),
+      /injected scaffold write failure/,
+    );
+    await assert.rejects(access(path.join(parent, "created-root")), /ENOENT/);
+    await createApplication(parent, "created-root");
+
+    const existingRoot = path.join(parent, "existing-root");
+    await mkdir(existingRoot);
+    await assert.rejects(
+      createApplication(parent, "existing-root", failOnSecondFile()),
+      /injected scaffold write failure/,
+    );
+    assert.deepEqual(await readdir(existingRoot), []);
+    await createApplication(parent, "existing-root");
+    assert.deepEqual((await readdir(existingRoot)).sort(), ["package.json", "src", "tsconfig.json"]);
+
+    const doubleFailureFileSystem: ApplicationScaffoldFileSystem = {
+      createDirectory: async (directory) => { await mkdir(directory, { recursive: true }); },
+      createFile: async () => { throw new Error("injected write failure"); },
+      removePath: async () => { throw new Error("injected rollback failure"); },
+    };
+    await assert.rejects(
+      createApplication(parent, "rollback-fails", doubleFailureFileSystem),
+      (error: unknown) => {
+        assert.ok(error instanceof AggregateError);
+        assert.equal(error.errors[0]?.message, "injected write failure");
+        assert.equal(error.errors[1]?.message, "injected rollback failure");
+        return true;
+      },
+    );
+
+    const reported = await invoke(["new", "rollback-fails"], parent, {
+      createApplication: async () => {
+        throw new AggregateError(
+          [new Error("injected write failure"), new Error("injected rollback failure")],
+          "Application scaffold failed and rollback was incomplete: rollback-fails",
+        );
+      },
+    });
+    assert.equal(reported.code, 1);
+    assert.equal(reported.stdout, "");
+    assert.equal(
+      reported.stderr,
+      "Application scaffold failed and rollback was incomplete: rollback-fails\n"
+        + "injected write failure\n"
+        + "injected rollback failure\n",
+    );
+  });
+
   it("creates focused idempotent feature artifacts and rejects unsafe names", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "tor-generate-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -222,10 +307,102 @@ describe("app scaffold and generators", () => {
       const result = await invoke(["create", "feature", unsafe], root);
       assert.equal(result.code, 2, unsafe);
     }
+
+    const boundaryBeforeInvalidNames = await readFile(path.join(featureRoot, "index.ts"), "utf8");
+    for (const invalidName of ["123-report", "delete", "Class", "await"]) {
+      const result = await invoke(["create", "action", invalidName, "--feature", "billing"], root);
+      assert.equal(result.code, 2, invalidName);
+      assert.match(result.stderr, /Invalid generated identifier/);
+    }
+    assert.equal(await readFile(path.join(featureRoot, "index.ts"), "utf8"), boundaryBeforeInvalidNames);
+
+    const actionCollision = await invoke(["create", "action", "sendInvoice", "--feature", "billing"], root);
+    assert.equal(actionCollision.code, 0, actionCollision.stderr);
+    const boundaryBeforeCollision = await readFile(path.join(featureRoot, "index.ts"), "utf8");
+    const queryCollision = await invoke(["create", "query", "send-invoice", "--feature", "billing"], root);
+    assert.equal(queryCollision.code, 1);
+    assert.match(queryCollision.stderr, /Generated file collision/);
+    assert.equal(await readFile(path.join(featureRoot, "index.ts"), "utf8"), boundaryBeforeCollision);
+    assert.match(await readFile(path.join(featureRoot, "send-invoice.ts"), "utf8"), /action\(/);
   });
 });
 
 describe("app diff --architecture", () => {
+  it("materializes many files exactly through one Git object reader", async () => {
+    const app = await fixture({
+      "src/features/billing/index.ts": "export const invoice = true;\n",
+    });
+    const assets = path.join(app.root, "assets");
+    await mkdir(assets);
+    const exactBytes = Buffer.from([0, 10, 13, 127, 128, 255]);
+    await writeFile(path.join(assets, "exact.bin"), exactBytes);
+    for (let index = 0; index < 24; index += 1) {
+      await writeFile(path.join(assets, `file-${String(index)}.txt`), `content ${String(index)}\n`);
+    }
+    git(app.root, ["init", "-b", "main"]);
+    git(app.root, ["add", "."]);
+    git(app.root, ["commit", "-m", "snapshot"]);
+
+    const traceRoot = await mkdtemp(path.join(tmpdir(), "tor-git-trace-"));
+    cleanup.push(() => rm(traceRoot, { recursive: true, force: true }));
+    const traceFile = path.join(traceRoot, "events.json");
+    const priorTrace = process.env.GIT_TRACE2_EVENT;
+    process.env.GIT_TRACE2_EVENT = traceFile;
+    let inspectedSnapshot = false;
+    try {
+      await createGitArchitectureDiff(app.root, "HEAD", (root) => {
+        if (root !== app.root) {
+          inspectedSnapshot = true;
+          assert.deepEqual(readFileSync(path.join(root, "assets", "exact.bin")), exactBytes);
+        }
+        return analyzeApplication(root);
+      });
+    } finally {
+      if (priorTrace === undefined) delete process.env.GIT_TRACE2_EVENT;
+      else process.env.GIT_TRACE2_EVENT = priorTrace;
+    }
+    assert.equal(inspectedSnapshot, true);
+
+    const starts = (await readFile(traceFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { readonly event?: string; readonly argv?: readonly string[] })
+      .filter((entry) => entry.event === "start")
+      .map((entry) => entry.argv ?? []);
+    assert.equal(starts.filter((args) => args.includes("cat-file") && args.includes("--batch")).length, 1);
+    assert.equal(starts.filter((args) => args.includes("show")).length, 0);
+  });
+
+  it("closes the object reader for missing, non-blob, and Git error responses", { timeout: 10_000 }, async () => {
+    const missingRoot = await mkdtemp(path.join(tmpdir(), "tor-git-missing-"));
+    cleanup.push(() => rm(missingRoot, { recursive: true, force: true }));
+    await writeFile(path.join(missingRoot, "missing.txt"), "missing blob\n");
+    git(missingRoot, ["init", "-b", "main"]);
+    git(missingRoot, ["add", "."]);
+    git(missingRoot, ["commit", "-m", "missing"]);
+    const missingObject = git(missingRoot, ["rev-parse", "HEAD:missing.txt"]);
+    await rm(path.join(missingRoot, ".git", "objects", missingObject.slice(0, 2), missingObject.slice(2)));
+    await assert.rejects(createGitArchitectureDiff(missingRoot), /Missing Git object/);
+
+    const nonBlobRoot = await mkdtemp(path.join(tmpdir(), "tor-git-nonblob-"));
+    cleanup.push(() => rm(nonBlobRoot, { recursive: true, force: true }));
+    git(nonBlobRoot, ["init", "-b", "main"]);
+    const nestedTree = git(nonBlobRoot, ["mktree"], "");
+    const nestedCommit = git(nonBlobRoot, ["commit-tree", nestedTree, "-m", "nested"]);
+    const rootTree = git(nonBlobRoot, ["mktree"], `160000 commit ${nestedCommit}\tsubmodule\n`);
+    const rootCommit = git(nonBlobRoot, ["commit-tree", rootTree, "-m", "root"]);
+    git(nonBlobRoot, ["update-ref", "refs/heads/main", rootCommit]);
+    await assert.rejects(
+      createGitArchitectureDiff(nonBlobRoot),
+      /Unsupported Git object type commit at submodule/,
+    );
+
+    await assert.rejects(
+      createGitArchitectureDiff(nonBlobRoot, "missing-ref"),
+      /not a valid object name|Not a valid object name|fatal:/,
+    );
+  });
+
   it("compares the working tree to HEAD through a read-only Git snapshot", async () => {
     const app = await fixture({
       "src/features/billing/index.ts": "export const invoice = true;\n",

@@ -5,6 +5,7 @@ export {
   createFeature,
   createModel,
   createQuery,
+  type ApplicationScaffoldFileSystem,
   type GenerationResult,
 } from "./scaffold.js";
 

@@ -45,6 +45,10 @@ export interface CliDependencies {
   readonly analyze?: (root: string) => ArchitectureManifest;
   readonly inspect?: (root: string) => ApplicationInspector;
   readonly architectureDiff?: (root: string, ref: string) => Promise<ArchitectureDiff>;
+  readonly createApplication?: (
+    cwd: string,
+    target: string,
+  ) => Promise<{ readonly created: readonly string[]; readonly unchanged: readonly string[] }>;
 }
 
 const usage = `Usage: app <command> [options]
@@ -236,8 +240,15 @@ function isUsageFailure(error: unknown): boolean {
   if (error instanceof CliUsageError) return true;
   return error instanceof Error
     && (error.message.startsWith("Invalid name:")
+      || error.message.startsWith("Invalid generated identifier")
       || error.message.startsWith("Invalid target directory:")
       || error.message.startsWith("Invalid feature name:"));
+}
+
+function formatCliError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof AggregateError)) return message;
+  return [message, ...error.errors.map(formatCliError)].join("\n");
 }
 
 export async function runCli(args: readonly string[], dependencies: CliDependencies = {}): Promise<number> {
@@ -248,13 +259,14 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
   const analyze = dependencies.analyze ?? analyzeApplication;
   const inspect = dependencies.inspect ?? inspectApplication;
   const architectureDiff = dependencies.architectureDiff ?? createGitArchitectureDiff;
+  const scaffoldApplication = dependencies.createApplication ?? createApplication;
   try {
     const command = args[0];
     const rest = args.slice(1);
     if (command === undefined) throw new CliUsageError("Missing command");
     if (command === "new") {
       if (rest.length !== 1 || rest[0] === undefined) throw new CliUsageError("Expected new <directory>");
-      renderGeneration(stdout, await createApplication(cwd, rest[0]));
+      renderGeneration(stdout, await scaffoldApplication(cwd, rest[0]));
       return 0;
     }
     if (command === "dev" || command === "build" || command === "test") {
@@ -282,7 +294,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       stderr.write(`${usage}${error instanceof Error ? `\n${error.message}\n` : ""}`);
       return 2;
     }
-    stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    stderr.write(`${formatCliError(error)}\n`);
     return 1;
   }
 }
