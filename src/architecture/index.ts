@@ -1,12 +1,18 @@
-export interface ArchitectureAllowance {
-  readonly kind: "architecture-allowance";
-  readonly rule: string;
-  readonly reason: string;
-  readonly expires?: string;
-}
-
-export const architecture = {
-  allow(definition: Omit<ArchitectureAllowance, "kind">): ArchitectureAllowance {
-    return { kind: "architecture-allowance", ...definition };
-  },
-};
+export { analyzeApplication } from "./analyze.js";
+export { architecture, type ArchitectureAllowance } from "./exceptions.js";
+export type {
+  AdapterManifest,
+  AnalyzeApplicationOptions,
+  ArchitectureDiagnostic,
+  ArchitectureExceptionManifest,
+  ArchitectureManifest,
+  ArchitectureSeverity,
+  DependencyManifest,
+  EventManifest,
+  FeatureManifest,
+  ModelManifest,
+  OperationManifest,
+  PublicExportManifest,
+  RouteManifest,
+  SourceLocation,
+} from "./manifest.js";
