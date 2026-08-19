@@ -27,7 +27,7 @@
     "node": ">=22"
   },
   "bin": {
-    "app": "./dist/bin.js"
+    "app": "dist/bin.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
