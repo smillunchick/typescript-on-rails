@@ -14,10 +14,11 @@ export interface SemanticCategory<T> {
 export interface FeatureSemantic { readonly name: string }
 export interface PublicApiSemantic { readonly feature: string; readonly name: string; readonly kind: string }
 export interface DependencySemantic { readonly from: string; readonly to: string }
-export interface ModelSemantic { readonly name: string; readonly feature: string | null }
-export interface RouteSemantic { readonly name: string; readonly method: string | null; readonly path: string | null; readonly feature: string | null; readonly permission: string | null }
-export interface EventSemantic { readonly name: string; readonly feature: string | null }
-export interface AdapterSemantic { readonly name: string; readonly kind: "contract" | "implementation"; readonly feature: string | null }
+export interface ModelSemantic { readonly name: string; readonly feature: string | null; readonly contract: string }
+export interface OperationSemantic { readonly name: string; readonly kind: "action" | "query"; readonly feature: string | null; readonly permission: string | null; readonly contract: string }
+export interface RouteSemantic { readonly name: string; readonly method: string | null; readonly path: string | null; readonly feature: string | null; readonly permission: string | null; readonly contract: string }
+export interface EventSemantic { readonly name: string; readonly feature: string | null; readonly contract: string }
+export interface AdapterSemantic { readonly name: string; readonly kind: "contract" | "implementation"; readonly feature: string | null; readonly contract: string | null }
 
 export interface ArchitectureDiff {
   readonly changed: boolean;
@@ -25,6 +26,7 @@ export interface ArchitectureDiff {
   readonly publicApis: SemanticCategory<PublicApiSemantic>;
   readonly dependencies: SemanticCategory<DependencySemantic>;
   readonly models: SemanticCategory<ModelSemantic>;
+  readonly operations: SemanticCategory<OperationSemantic>;
   readonly permissions: SemanticCategory<string>;
   readonly routes: SemanticCategory<RouteSemantic>;
   readonly events: SemanticCategory<EventSemantic>;
@@ -67,7 +69,14 @@ function semantic(manifest: ArchitectureManifest) {
     features: manifest.features.map((entry) => ({ name: entry.name })),
     publicApis: publicApis(manifest),
     dependencies: manifest.dependencies.map((entry) => ({ from: entry.from, to: entry.to })),
-    models: manifest.models.map((entry) => ({ name: entry.name, feature: entry.feature })),
+    models: manifest.models.map((entry) => ({ name: entry.name, feature: entry.feature, contract: entry.contract })),
+    operations: manifest.operations.map((entry) => ({
+      name: entry.name,
+      kind: entry.kind,
+      feature: entry.feature,
+      permission: entry.permission ?? null,
+      contract: entry.contract,
+    })),
     permissions: [...manifest.permissions],
     routes: manifest.routes.map((entry) => ({
       name: entry.name,
@@ -75,9 +84,10 @@ function semantic(manifest: ArchitectureManifest) {
       path: entry.path,
       feature: entry.feature,
       permission: entry.permission ?? null,
+      contract: entry.contract,
     })),
-    events: manifest.events.map((entry) => ({ name: entry.name, feature: entry.feature })),
-    adapters: manifest.adapters.map((entry) => ({ name: entry.name, kind: entry.kind, feature: entry.feature })),
+    events: manifest.events.map((entry) => ({ name: entry.name, feature: entry.feature, contract: entry.contract })),
+    adapters: manifest.adapters.map((entry) => ({ name: entry.name, kind: entry.kind, feature: entry.feature, contract: entry.contract })),
   };
 }
 
@@ -93,6 +103,7 @@ export function diffArchitecture(before: ArchitectureManifest, after: Architectu
     publicApis: category(previous.publicApis, current.publicApis, (entry) => `${entry.feature}\0${entry.name}`),
     dependencies: category(previous.dependencies, current.dependencies, (entry) => `${entry.from}\0${entry.to}`),
     models: category(previous.models, current.models, (entry) => entry.name),
+    operations: category(previous.operations, current.operations, (entry) => entry.name),
     permissions: category(previous.permissions, current.permissions, (entry) => entry),
     routes: category(previous.routes, current.routes, (entry) => entry.name),
     events: category(previous.events, current.events, (entry) => entry.name),
@@ -102,6 +113,7 @@ export function diffArchitecture(before: ArchitectureManifest, after: Architectu
     || hasChanges(result.publicApis)
     || hasChanges(result.dependencies)
     || hasChanges(result.models)
+    || hasChanges(result.operations)
     || hasChanges(result.permissions)
     || hasChanges(result.routes)
     || hasChanges(result.events)
@@ -114,6 +126,7 @@ const categoryOrder = [
   ["Public API", "publicApis"],
   ["Dependency", "dependencies"],
   ["Model", "models"],
+  ["Operation", "operations"],
   ["Permission", "permissions"],
   ["Route", "routes"],
   ["Event", "events"],

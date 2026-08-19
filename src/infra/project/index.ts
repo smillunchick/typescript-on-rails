@@ -7,3 +7,5 @@ export {
   createQuery,
   type GenerationResult,
 } from "./scaffold.js";
+
+export { runProjectCommand, type ProjectCommandInvocation } from "./process.js";

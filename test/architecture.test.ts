@@ -85,6 +85,32 @@ export const email = implementAdapter(Email, { send: () => true });
     assert.match(diagnostic.suggestion ?? "", /@\/features\/billing/);
   });
 
+  it("enforces named, star, and external-package re-exports", async () => {
+    const manifest = await analyze({
+      "node_modules/vendor-sdk/package.json": `{"name":"vendor-sdk","types":"index.d.ts"}`,
+      "node_modules/vendor-sdk/index.d.ts": `export declare const vendorValue: string;`,
+      "node_modules/vendor-types/package.json": `{"name":"vendor-types","types":"index.d.ts"}`,
+      "node_modules/vendor-types/index.d.ts": `export interface VendorType { readonly value: string }`,
+      "src/features/billing/index.ts": emptyBoundary,
+      "src/features/billing/actions.ts": `export const invoice = true; export const refund = true;`,
+      "src/features/named/index.ts": `export { invoice as publicInvoice } from "../billing/actions.js";`,
+      "src/features/named/view.client.ts": `export { refund } from "../billing/actions.js";`,
+      "src/features/star/index.ts": `export * from "../billing/actions.js";`,
+      "src/features/vendor/index.ts": `export { vendorValue } from "vendor-sdk";`,
+      "src/features/types/index.ts": `export type { VendorType } from "vendor-types";`,
+    });
+
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "feature-boundary" && entry.file.includes("features/named")));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "feature-boundary" && entry.file.includes("features/star")));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "runtime-boundary" && entry.file.includes("view.client")));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "external-io" && entry.target === "vendor-sdk"));
+    assert.ok(!manifest.diagnostics.some((entry) => entry.rule === "external-io" && entry.target === "vendor-types"));
+    assert.deepEqual(manifest.dependencies.map(({ from, to, symbols }) => ({ from, to, symbols })), [
+      { from: "named", to: "billing", symbols: ["invoice", "refund"] },
+      { from: "star", to: "billing", symbols: ["*"] },
+    ]);
+  });
+
   it("reports full feature cycles and missing public boundaries", async () => {
     const manifest = await analyze({
       "src/features/a/index.ts": `import "@/features/b"; export const a = 1;`,
@@ -100,6 +126,7 @@ export const email = implementAdapter(Email, { send: () => true });
     const manifest = await analyze({
       "src/features/account/index.ts": emptyBoundary,
       "src/features/account/view.client.ts": `import "./secret.server.js"; import "node:fs"; import { changeBilling } from "@/features/billing"; export const view = changeBilling;`,
+      "src/features/account/namespace.client.ts": `import * as billing from "@/features/billing"; export const namespace = billing;`,
       "src/features/account/secret.server.ts": `export const secret = true;`,
       "src/features/billing/actions.ts": `import { action, object } from "typescript-on-rails"; export const changeBilling = action({ input: object({}), public: true, run: () => true });`,
       "src/features/billing/index.ts": `export { changeBilling } from "./actions.js";`,
@@ -108,8 +135,54 @@ export const email = implementAdapter(Email, { send: () => true });
     });
     assert.ok(rules(manifest).includes("runtime-boundary"));
     assert.ok(manifest.diagnostics.some((entry) => entry.rule === "runtime-boundary" && entry.target === "@/features/billing"));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "runtime-boundary" && entry.file.endsWith("namespace.client.ts")));
     assert.ok(rules(manifest).includes("domain-ui"));
     assert.ok(rules(manifest).includes("external-io"));
+  });
+
+  it("restricts privileged Node IO while allowing pure and type-only imports", async () => {
+    const manifest = await analyze({
+      "src/features/account/index.ts": `
+import type { PathLike } from "node:fs";
+import path from "node:path";
+import fs from "node:fs";
+import childProcess from "node:child_process";
+export { path, fs, childProcess };
+export type { PathLike };
+`,
+    });
+    const targets = manifest.diagnostics.filter((entry) => entry.rule === "external-io").map((entry) => entry.target);
+    assert.deepEqual(targets, ["node:fs", "node:child_process"]);
+    assert.ok(!targets.includes("node:path"));
+  });
+
+  it("extracts deterministic static contracts and ignores object order and implementation bodies", async () => {
+    const first = await analyze({
+      "src/features/billing/index.ts": `
+import { action, boolean, defineAdapterContract, defineModel, event, id, object, string } from "typescript-on-rails";
+export const Invoice = defineModel({ name: "Invoice", fields: { title: string(), id: id("Invoice") } });
+export const approve = action({ permission: "invoice.approve", input: object({ id: string() }), output: boolean(), run: () => true });
+export const Paid = event({ name: "Paid", payload: object({ id: string() }) });
+export const Payments = defineAdapterContract({ name: "Payments", operations: { charge: { output: boolean(), input: object({ id: string() }) } } });
+`,
+    });
+    const second = await analyze({
+      "src/features/billing/index.ts": `
+import { action, boolean, defineAdapterContract, defineModel, event, id, object, string } from "typescript-on-rails";
+export const Invoice = defineModel({ fields: { id: id("Invoice"), title: string() }, name: "Invoice" });
+export const approve = action({ input: object({ id: string() }), output: boolean(), permission: "invoice.approve", run: () => false });
+export const Paid = event({ payload: object({ id: string() }), name: "Paid" });
+export const Payments = defineAdapterContract({ operations: { charge: { input: object({ id: string() }), output: boolean() } }, name: "Payments" });
+`,
+    });
+    assert.deepEqual(first.models.map((entry) => entry.contract), second.models.map((entry) => entry.contract));
+    assert.deepEqual(first.operations.map((entry) => entry.contract), second.operations.map((entry) => entry.contract));
+    assert.deepEqual(first.events.map((entry) => entry.contract), second.events.map((entry) => entry.contract));
+    assert.deepEqual(first.adapters.map((entry) => entry.contract), second.adapters.map((entry) => entry.contract));
+    assert.equal(first.models[0]?.contract, `{fields:{"id":id("Invoice"),"title":string()}}`);
+    assert.equal(first.operations[0]?.contract, `{input:object({"id":string()}),output:boolean(),access:permission:"invoice.approve"}`);
+    assert.equal(first.events[0]?.contract, `{payload:object({"id":string()})}`);
+    assert.equal(first.adapters[0]?.contract, `{operations:{"charge":{"input":object({"id":string()}),"output":boolean()}}}`);
   });
 
   it("rejects non-boring TypeScript constructs", async () => {
@@ -169,6 +242,12 @@ architecture.allow({ rule: "external-io", reason: "   " });
 import nope from "vendor-nope";
 export { nope };
 `,
+      "src/features/account/impossible-date.ts": `
+import { architecture } from "typescript-on-rails";
+architecture.allow({ rule: "external-io", reason: "Impossible date", expires: "2099-02-30" });
+import future from "vendor-future";
+export { future };
+`,
     });
     const externalTargets = manifest.diagnostics
       .filter((entry) => entry.rule === "external-io")
@@ -177,8 +256,9 @@ export { nope };
     assert.ok(externalTargets.includes("vendor-bad"));
     assert.ok(externalTargets.includes("vendor-old"));
     assert.ok(externalTargets.includes("vendor-nope"));
-    assert.ok(manifest.diagnostics.filter((entry) => entry.rule === "architecture-allowance").length >= 2);
-    assert.equal(manifest.exceptions.length, 3);
+    assert.ok(externalTargets.includes("vendor-future"));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "architecture-allowance" && /valid YYYY-MM-DD/.test(entry.message)));
+    assert.equal(manifest.exceptions.length, 4);
     assert.equal(manifest.exceptions.filter((entry) => entry.valid).length, 1);
   });
 

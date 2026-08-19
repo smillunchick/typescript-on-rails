@@ -25,7 +25,31 @@ architecture.allow({
 });
 
 const FRAMEWORK_PACKAGE = "typescript-on-rails";
-const NETWORK_MODULES = new Set(["http", "https", "http2", "net", "tls", "dns", "dgram"]);
+const EXTERNAL_IO_NODE_MODULES = new Set([
+  "child_process",
+  "cluster",
+  "dgram",
+  "dns",
+  "fs",
+  "fs/promises",
+  "http",
+  "http2",
+  "https",
+  "inspector",
+  "module",
+  "net",
+  "process",
+  "readline",
+  "readline/promises",
+  "repl",
+  "sqlite",
+  "tls",
+  "trace_events",
+  "v8",
+  "vm",
+  "wasi",
+  "worker_threads",
+]);
 const NODE_MODULES = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
 
 const RULE_CODES: Readonly<Record<string, string>> = {
@@ -67,8 +91,10 @@ interface FrameworkBindings {
   readonly namespaces: ReadonlySet<string>;
 }
 
-interface ImportRecord {
-  readonly node: ts.ImportDeclaration;
+type ModuleReference = ts.ImportDeclaration | ts.ExportDeclaration;
+
+interface ModuleReferenceRecord {
+  readonly node: ModuleReference;
   readonly specifier: string;
   readonly typeOnly: boolean;
   readonly resolved?: string;
@@ -253,6 +279,76 @@ function variableName(node: ts.Node): string | null {
   return current !== undefined && ts.isIdentifier(current.name) ? current.name.text : null;
 }
 
+function canonicalPropertyName(name: ts.PropertyName): string {
+  if (ts.isComputedPropertyName(name)) {
+    return `[${canonicalExpression(name.expression, { named: new Map(), namespaces: new Set() })}]`;
+  }
+  return name.text;
+}
+
+function canonicalExpression(expression: ts.Expression, bindings: FrameworkBindings): string {
+  if (ts.isStringLiteralLike(expression)) return JSON.stringify(expression.text);
+  if (ts.isNumericLiteral(expression)) return expression.text;
+  if (expression.kind === ts.SyntaxKind.TrueKeyword) return "true";
+  if (expression.kind === ts.SyntaxKind.FalseKeyword) return "false";
+  if (expression.kind === ts.SyntaxKind.NullKeyword) return "null";
+  if (ts.isParenthesizedExpression(expression)) return canonicalExpression(expression.expression, bindings);
+  if (ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) {
+    return canonicalExpression(expression.expression, bindings);
+  }
+  if (ts.isIdentifier(expression)) return `$${expression.text}`;
+  if (ts.isPropertyAccessExpression(expression)) {
+    return `${canonicalExpression(expression.expression, bindings)}.${expression.name.text}`;
+  }
+  if (ts.isPrefixUnaryExpression(expression)) {
+    return `${ts.tokenToString(expression.operator) ?? ""}${canonicalExpression(expression.operand, bindings)}`;
+  }
+  if (ts.isArrayLiteralExpression(expression)) {
+    return `[${expression.elements.map((entry) => canonicalExpression(entry, bindings)).join(",")}]`;
+  }
+  if (ts.isObjectLiteralExpression(expression)) {
+    const entries = expression.properties.map((entry): string => {
+      if (ts.isPropertyAssignment(entry)) {
+        return `${JSON.stringify(canonicalPropertyName(entry.name))}:${canonicalExpression(entry.initializer, bindings)}`;
+      }
+      if (ts.isShorthandPropertyAssignment(entry)) return `${JSON.stringify(entry.name.text)}:$${entry.name.text}`;
+      if (ts.isSpreadAssignment(entry)) return `...${canonicalExpression(entry.expression, bindings)}`;
+      return `${ts.SyntaxKind[entry.kind]}:${entry.name === undefined ? "" : canonicalPropertyName(entry.name)}`;
+    });
+    return `{${entries.sort(compareText).join(",")}}`;
+  }
+  if (ts.isCallExpression(expression)) {
+    const primitive = primitiveForCall(expression, bindings);
+    const callee = primitive === null ? canonicalExpression(expression.expression, bindings) : primitive;
+    return `${callee}(${expression.arguments.map((argument) => canonicalExpression(argument, bindings)).join(",")})`;
+  }
+  if (ts.isNoSubstitutionTemplateLiteral(expression)) return JSON.stringify(expression.text);
+  return `${ts.SyntaxKind[expression.kind]}(${expression.getText().replace(/\s+/g, " ")})`;
+}
+
+function accessSignature(definition: ts.ObjectLiteralExpression, bindings: FrameworkBindings): string {
+  const permission = property(definition, "permission");
+  if (permission !== undefined) return `permission:${canonicalExpression(permission, bindings)}`;
+  if (property(definition, "authorize") !== undefined) return "authorize";
+  const publicAccess = property(definition, "public");
+  if (publicAccess !== undefined) return `public:${canonicalExpression(publicAccess, bindings)}`;
+  return "missing";
+}
+
+function contractSignature(
+  definition: ts.ObjectLiteralExpression,
+  bindings: FrameworkBindings,
+  fields: readonly string[],
+  includeAccess = false,
+): string {
+  const entries = fields.map((name) => {
+    const value = property(definition, name);
+    return `${name}:${value === undefined ? "missing" : canonicalExpression(value, bindings)}`;
+  });
+  if (includeAccess) entries.push(`access:${accessSignature(definition, bindings)}`);
+  return `{${entries.join(",")}}`;
+}
+
 function extractDeclarations(root: string, sourceFile: ts.SourceFile, output: MutableManifest): void {
   const bindings = frameworkBindings(sourceFile);
   const feature = featureNameFor(root, sourceFile.fileName);
@@ -264,13 +360,19 @@ function extractDeclarations(root: string, sourceFile: ts.SourceFile, output: Mu
       const definition = objectArgument(node);
       if (primitive === "defineModel" && definition !== null) {
         const name = stringProperty(definition, "name") ?? nameFromVariable;
-        if (name !== null) output.models.push({ name, feature, ...location(root, sourceFile, node) });
+        if (name !== null) output.models.push({
+          name,
+          feature,
+          contract: contractSignature(definition, bindings, ["fields"]),
+          ...location(root, sourceFile, node),
+        });
       } else if ((primitive === "action" || primitive === "query") && definition !== null && nameFromVariable !== null) {
         const permission = stringProperty(definition, "permission");
         output.operations.push({
           name: nameFromVariable,
           kind: primitive,
           feature,
+          contract: contractSignature(definition, bindings, ["input", "output"], true),
           ...location(root, sourceFile, node),
           ...(permission === null ? {} : { permission }),
         });
@@ -282,23 +384,47 @@ function extractDeclarations(root: string, sourceFile: ts.SourceFile, output: Mu
           method: stringProperty(definition, "method"),
           path: stringProperty(definition, "path"),
           feature,
+          contract: contractSignature(definition, bindings, ["input", "output"], true),
           ...location(root, sourceFile, node),
           ...(permission === null ? {} : { permission }),
         });
         if (permission !== null) output.permissions.add(permission);
       } else if (primitive === "event" && definition !== null) {
         const name = stringProperty(definition, "name") ?? nameFromVariable;
-        if (name !== null) output.events.push({ name, feature, ...location(root, sourceFile, node) });
+        if (name !== null) output.events.push({
+          name,
+          feature,
+          contract: contractSignature(definition, bindings, ["payload"]),
+          ...location(root, sourceFile, node),
+        });
       } else if (primitive === "defineAdapterContract" && definition !== null) {
         const name = stringProperty(definition, "name") ?? nameFromVariable;
-        if (name !== null) output.adapters.push({ name, kind: "contract", feature, ...location(root, sourceFile, node) });
+        if (name !== null) output.adapters.push({
+          name,
+          kind: "contract",
+          feature,
+          contract: contractSignature(definition, bindings, ["operations"]),
+          ...location(root, sourceFile, node),
+        });
       } else if (primitive === "implementAdapter" && nameFromVariable !== null) {
-        output.adapters.push({ name: nameFromVariable, kind: "implementation", feature, ...location(root, sourceFile, node) });
+        output.adapters.push({ name: nameFromVariable, kind: "implementation", feature, contract: null, ...location(root, sourceFile, node) });
       }
     }
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
+}
+
+function isExactUtcDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (match === null) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day;
 }
 
 function extractAllowances(root: string, sourceFile: ts.SourceFile, output: MutableManifest): void {
@@ -332,7 +458,7 @@ function extractAllowances(root: string, sourceFile: ts.SourceFile, output: Muta
       let issue: string | null = null;
       if (!valid) issue = "Architecture allowances require a nonblank literal rule and reason";
       if (expires !== null) {
-        const parsed = /^\d{4}-\d{2}-\d{2}$/.test(expires) && !Number.isNaN(Date.parse(`${expires}T00:00:00.000Z`));
+        const parsed = isExactUtcDate(expires);
         if (!parsed) {
           valid = false;
           issue = "Architecture allowance expiry must use a valid YYYY-MM-DD date";
@@ -357,35 +483,46 @@ function extractAllowances(root: string, sourceFile: ts.SourceFile, output: Muta
   visit(sourceFile);
 }
 
-function importsFor(sourceFile: ts.SourceFile, compilerOptions: ts.CompilerOptions): ImportRecord[] {
-  const imports: ImportRecord[] = [];
+function moduleReferencesFor(sourceFile: ts.SourceFile, compilerOptions: ts.CompilerOptions): ModuleReferenceRecord[] {
+  const references: ModuleReferenceRecord[] = [];
   for (const statement of sourceFile.statements) {
-    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    if ((!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement))
+      || statement.moduleSpecifier === undefined
+      || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
     const specifier = statement.moduleSpecifier.text;
-    const clause = statement.importClause;
-    const typeOnly = clause?.isTypeOnly === true
-      || (clause?.namedBindings !== undefined
-        && ts.isNamedImports(clause.namedBindings)
-        && clause.namedBindings.elements.length > 0
-        && clause.namedBindings.elements.every((entry) => entry.isTypeOnly));
+    let typeOnly = false;
+    if (ts.isImportDeclaration(statement)) {
+      const clause = statement.importClause;
+      typeOnly = clause?.isTypeOnly === true
+        || (clause?.namedBindings !== undefined
+          && ts.isNamedImports(clause.namedBindings)
+          && clause.namedBindings.elements.length > 0
+          && clause.namedBindings.elements.every((entry) => entry.isTypeOnly));
+    } else if (statement.exportClause !== undefined && ts.isNamedExports(statement.exportClause)) {
+      typeOnly = statement.isTypeOnly || (statement.exportClause.elements.length > 0
+        && statement.exportClause.elements.every((entry) => entry.isTypeOnly));
+    } else {
+      typeOnly = statement.isTypeOnly;
+    }
     const resolved = ts.resolveModuleName(specifier, sourceFile.fileName, compilerOptions, ts.sys).resolvedModule?.resolvedFileName;
-    imports.push({ node: statement, specifier, typeOnly, ...(resolved === undefined ? {} : { resolved }) });
+    references.push({ node: statement, specifier, typeOnly, ...(resolved === undefined ? {} : { resolved }) });
   }
-  return imports;
+  return references;
 }
 
-function importedPublicSymbols(node: ts.ImportDeclaration): string[] {
+function referencedPublicSymbols(node: ModuleReference): string[] {
+  if (ts.isExportDeclaration(node)) {
+    if (node.exportClause === undefined || ts.isNamespaceExport(node.exportClause)) return ["*"];
+    return [...new Set(node.exportClause.elements.map((element) => element.propertyName?.text ?? element.name.text))]
+      .sort(compareText);
+  }
   const clause = node.importClause;
   if (clause === undefined) return [];
   const symbols: string[] = [];
   if (clause.name !== undefined) symbols.push("default");
   if (clause.namedBindings !== undefined) {
     if (ts.isNamespaceImport(clause.namedBindings)) symbols.push("*");
-    else {
-      for (const element of clause.namedBindings.elements) {
-        symbols.push(element.propertyName?.text ?? element.name.text);
-      }
-    }
+    else for (const element of clause.namedBindings.elements) symbols.push(element.propertyName?.text ?? element.name.text);
   }
   return [...new Set(symbols)].sort(compareText);
 }
@@ -418,26 +555,35 @@ function hasUseClient(sourceFile: ts.SourceFile): boolean {
   );
 }
 
-function importedValueDeclarationFiles(checker: ts.TypeChecker, node: ts.ImportDeclaration): string[] {
-  const clause = node.importClause;
-  if (clause === undefined || clause.isTypeOnly) return [];
+function referencedValueDeclarationFiles(checker: ts.TypeChecker, node: ModuleReference): string[] {
+  if (ts.isExportDeclaration(node) && node.isTypeOnly) return [];
   const symbols: ts.Symbol[] = [];
-  const addSymbol = (name: ts.Identifier): void => {
+  const addSymbol = (name: ts.Node): void => {
     const symbol = checker.getSymbolAtLocation(name);
     if (symbol !== undefined) symbols.push(resolvedSymbol(checker, symbol));
   };
-  if (clause.name !== undefined) addSymbol(clause.name);
-  if (clause.namedBindings !== undefined) {
-    if (ts.isNamedImports(clause.namedBindings)) {
-      for (const element of clause.namedBindings.elements) {
-        if (!element.isTypeOnly) addSymbol(element.name);
+  if (ts.isImportDeclaration(node)) {
+    const clause = node.importClause;
+    if (clause === undefined || clause.isTypeOnly) return [];
+    if (clause.name !== undefined) addSymbol(clause.name);
+    if (clause.namedBindings !== undefined) {
+      if (ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) if (!element.isTypeOnly) addSymbol(element.name);
+      } else {
+        const namespaceSymbol = checker.getSymbolAtLocation(clause.namedBindings.name);
+        if (namespaceSymbol !== undefined) {
+          const moduleSymbol = resolvedSymbol(checker, namespaceSymbol);
+          for (const exported of checker.getExportsOfModule(moduleSymbol)) symbols.push(resolvedSymbol(checker, exported));
+        }
       }
-    } else {
-      const namespaceSymbol = checker.getSymbolAtLocation(clause.namedBindings.name);
-      if (namespaceSymbol !== undefined) {
-        const moduleSymbol = resolvedSymbol(checker, namespaceSymbol);
-        for (const exported of checker.getExportsOfModule(moduleSymbol)) symbols.push(resolvedSymbol(checker, exported));
-      }
+    }
+  } else if (node.exportClause !== undefined && ts.isNamedExports(node.exportClause)) {
+    for (const element of node.exportClause.elements) if (!element.isTypeOnly) addSymbol(element.name);
+  } else {
+    const moduleSpecifier = node.moduleSpecifier;
+    const moduleSymbol = moduleSpecifier === undefined ? undefined : checker.getSymbolAtLocation(moduleSpecifier);
+    if (moduleSymbol !== undefined) {
+      for (const exported of checker.getExportsOfModule(moduleSymbol)) symbols.push(resolvedSymbol(checker, exported));
     }
   }
   return [...new Set(symbols.flatMap((symbol) => symbol.declarations ?? []).map((entry) => entry.getSourceFile().fileName))];
@@ -454,14 +600,16 @@ function checkImports(
   const sourceFeature = featureNameFor(root, sourceFile.fileName);
   const sourceRole = pathRole(sourceFile.fileName);
   const client = sourceRole.client || hasUseClient(sourceFile);
-  for (const entry of importsFor(sourceFile, compilerOptions)) {
-    const importLocation = location(root, sourceFile, entry.node.moduleSpecifier);
+  for (const entry of moduleReferencesFor(sourceFile, compilerOptions)) {
+    const moduleSpecifier = entry.node.moduleSpecifier;
+    if (moduleSpecifier === undefined) continue;
+    const importLocation = location(root, sourceFile, moduleSpecifier);
     const targetFeature = entry.resolved === undefined ? null : featureNameFor(root, entry.resolved);
     if (sourceFeature !== null && targetFeature !== null && sourceFeature !== targetFeature) {
       output.dependencies.push({
         from: sourceFeature,
         to: targetFeature,
-        symbols: importedPublicSymbols(entry.node),
+        symbols: referencedPublicSymbols(entry.node),
         ...importLocation,
       });
       const targetBase = path.basename(entry.resolved ?? "");
@@ -481,7 +629,7 @@ function checkImports(
     if (client && !entry.typeOnly) {
       const runtimeTargets = [
         ...(entry.resolved === undefined ? [] : [entry.resolved]),
-        ...importedValueDeclarationFiles(checker, entry.node),
+        ...referencedValueDeclarationFiles(checker, entry.node),
       ];
       const unsafeTarget = nodeModule || runtimeTargets.some((target) => (
         /\.server\.tsx?$/.test(target)
@@ -511,7 +659,7 @@ function checkImports(
 
     const packageTarget = packageName(entry.specifier);
     const isInternal = entry.resolved !== undefined && inside(path.join(root, "src"), entry.resolved);
-    const networkModule = NETWORK_MODULES.has(entry.specifier.replace(/^node:/, ""));
+    const externalIoNodeModule = EXTERNAL_IO_NODE_MODULES.has(entry.specifier.replace(/^node:/, ""));
     const externalPackage = !entry.specifier.startsWith(".")
       && !isInternal
       && !nodeModule
@@ -519,7 +667,8 @@ function checkImports(
     if (
       !isInfra(root, sourceFile.fileName)
       && !allowedExternalPackages.has(packageTarget)
-      && ((networkModule && !entry.typeOnly) || externalPackage)
+      && !entry.typeOnly
+      && (externalIoNodeModule || externalPackage)
     ) {
       output.diagnostics.push(diagnostic(
         "external-io",

@@ -1,5 +1,3 @@
-import { spawn } from "node:child_process";
-
 import {
   analyzeApplication,
   formatArchitectureDiagnostic,
@@ -22,6 +20,7 @@ import {
   createGitArchitectureDiff,
   createModel,
   createQuery,
+  runProjectCommand,
   validateGitRef,
   type GenerationResult,
 } from "../../infra/project/index.js";
@@ -64,18 +63,6 @@ Commands:
 `;
 
 class CliUsageError extends Error {}
-
-function defaultRunner(invocation: CommandInvocation): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(invocation.command, invocation.args, {
-      cwd: invocation.cwd,
-      shell: false,
-      stdio: "inherit",
-    });
-    child.on("error", reject);
-    child.on("close", (code) => resolve(code ?? 1));
-  });
-}
 
 function json(stream: CliStream, value: unknown): void {
   stream.write(`${JSON.stringify(value, null, 2)}\n`);
@@ -257,7 +244,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
   const cwd = dependencies.cwd ?? process.cwd();
   const stdout = dependencies.stdout ?? process.stdout;
   const stderr = dependencies.stderr ?? process.stderr;
-  const runCommand = dependencies.runCommand ?? defaultRunner;
+  const runCommand = dependencies.runCommand ?? runProjectCommand;
   const analyze = dependencies.analyze ?? analyzeApplication;
   const inspect = dependencies.inspect ?? inspectApplication;
   const architectureDiff = dependencies.architectureDiff ?? createGitArchitectureDiff;

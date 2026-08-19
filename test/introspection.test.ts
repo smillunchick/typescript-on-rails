@@ -40,9 +40,9 @@ function manifest(overrides: Partial<ArchitectureManifest> = {}): ArchitectureMa
     version: 1,
     root: "/app",
     features: [{ name: "billing", publicBoundary: "src/features/billing/index.ts", exports: [{ name: "approveInvoice", kind: "value", file: "a.ts", line: 1 }], file: "a.ts", line: 1 }],
-    models: [{ name: "Invoice", feature: "billing", file: "model.ts", line: 1 }],
-    operations: [{ name: "approveInvoice", kind: "action", feature: "billing", permission: "invoice.approve", file: "actions.ts", line: 1 }],
-    routes: [{ name: "invoiceRoute", method: "GET", path: "/invoices/:id", feature: "billing", permission: "invoice.read", file: "actions.ts", line: 2 }],
+    models: [{ name: "Invoice", feature: "billing", contract: "model-v1", file: "model.ts", line: 1 }],
+    operations: [{ name: "approveInvoice", kind: "action", feature: "billing", contract: "action-v1", permission: "invoice.approve", file: "actions.ts", line: 1 }],
+    routes: [{ name: "invoiceRoute", method: "GET", path: "/invoices/:id", feature: "billing", contract: "route-v1", permission: "invoice.read", file: "actions.ts", line: 2 }],
     events: [],
     adapters: [],
     permissions: ["invoice.approve", "invoice.read"],
@@ -139,19 +139,41 @@ describe("semantic architecture diff", () => {
   it("reports semantic additions, removals, and changes", () => {
     const before = manifest();
     const after = manifest({
-      models: [{ name: "Invoice", feature: "accounts", file: "x.ts", line: 1 }],
-      routes: [{ name: "invoiceRoute", method: "POST", path: "/invoices", feature: "billing", permission: "invoice.create", file: "x.ts", line: 2 }],
+      models: [{ name: "Invoice", feature: "accounts", contract: "model-v1", file: "x.ts", line: 1 }],
+      routes: [{ name: "invoiceRoute", method: "POST", path: "/invoices", feature: "billing", contract: "route-v1", permission: "invoice.create", file: "x.ts", line: 2 }],
       permissions: ["invoice.create"],
-      events: [{ name: "InvoiceCreated", feature: "billing", file: "x.ts", line: 3 }],
+      events: [{ name: "InvoiceCreated", feature: "billing", contract: "event-v1", file: "x.ts", line: 3 }],
     });
     const diff = diffArchitecture(before, after);
 
     assert.equal(diff.changed, true);
-    assert.deepEqual(diff.models.changed, [{ before: { name: "Invoice", feature: "billing" }, after: { name: "Invoice", feature: "accounts" } }]);
+    assert.deepEqual(diff.models.changed, [{ before: { name: "Invoice", feature: "billing", contract: "model-v1" }, after: { name: "Invoice", feature: "accounts", contract: "model-v1" } }]);
     assert.deepEqual(diff.permissions.added, ["invoice.create"]);
     assert.deepEqual(diff.permissions.removed, ["invoice.approve", "invoice.read"]);
     assert.equal(diff.routes.changed.length, 1);
-    assert.deepEqual(diff.events.added, [{ name: "InvoiceCreated", feature: "billing" }]);
+    assert.deepEqual(diff.events.added, [{ name: "InvoiceCreated", feature: "billing", contract: "event-v1" }]);
     assert.match(formatArchitectureDiff(diff), /Model changed: Invoice/);
+  });
+
+  it("reports static contract-shape and access changes", () => {
+    const before = manifest({
+      events: [{ name: "InvoicePaid", feature: "billing", contract: "event-v1", file: "events.ts", line: 1 }],
+      adapters: [{ name: "Payments", kind: "contract", feature: "billing", contract: "adapter-v1", file: "payments.ts", line: 1 }],
+    });
+    const after = manifest({
+      models: before.models.map((entry) => ({ ...entry, contract: "model-v2" })),
+      operations: before.operations.map((entry) => ({ ...entry, contract: "action-v2", permission: "invoice.admin" })),
+      events: before.events.map((entry) => ({ ...entry, contract: "event-v2" })),
+      adapters: before.adapters.map((entry) => ({ ...entry, contract: "adapter-v2" })),
+      permissions: ["invoice.admin", "invoice.read"],
+    });
+
+    const diff = diffArchitecture(before, after);
+
+    assert.equal(diff.models.changed.length, 1);
+    assert.equal(diff.operations.changed.length, 1);
+    assert.equal(diff.events.changed.length, 1);
+    assert.equal(diff.adapters.changed.length, 1);
+    assert.match(formatArchitectureDiff(diff), /Operation changed: approveInvoice/);
   });
 });

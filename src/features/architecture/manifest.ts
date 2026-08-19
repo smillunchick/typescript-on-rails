@@ -30,12 +30,14 @@ export interface FeatureManifest extends SourceLocation {
 export interface ModelManifest extends SourceLocation {
   readonly name: string;
   readonly feature: string | null;
+  readonly contract: string;
 }
 
 export interface OperationManifest extends SourceLocation {
   readonly name: string;
   readonly kind: "action" | "query";
   readonly feature: string | null;
+  readonly contract: string;
   readonly permission?: string;
 }
 
@@ -44,18 +46,21 @@ export interface RouteManifest extends SourceLocation {
   readonly method: string | null;
   readonly path: string | null;
   readonly feature: string | null;
+  readonly contract: string;
   readonly permission?: string;
 }
 
 export interface EventManifest extends SourceLocation {
   readonly name: string;
   readonly feature: string | null;
+  readonly contract: string;
 }
 
 export interface AdapterManifest extends SourceLocation {
   readonly name: string;
   readonly kind: "contract" | "implementation";
   readonly feature: string | null;
+  readonly contract: string | null;
 }
 
 export interface DependencyManifest extends SourceLocation {

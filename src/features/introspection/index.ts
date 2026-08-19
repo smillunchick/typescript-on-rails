@@ -7,6 +7,7 @@ export {
   type EventSemantic,
   type FeatureSemantic,
   type ModelSemantic,
+  type OperationSemantic,
   type PublicApiSemantic,
   type RouteSemantic,
   type SemanticCategory,
