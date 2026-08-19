@@ -61,6 +61,7 @@ export interface AdapterManifest extends SourceLocation {
 export interface DependencyManifest extends SourceLocation {
   readonly from: string;
   readonly to: string;
+  readonly symbols: readonly string[];
 }
 
 export interface ArchitectureExceptionManifest extends SourceLocation {

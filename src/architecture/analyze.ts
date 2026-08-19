@@ -360,6 +360,22 @@ function importsFor(sourceFile: ts.SourceFile, compilerOptions: ts.CompilerOptio
   return imports;
 }
 
+function importedPublicSymbols(node: ts.ImportDeclaration): string[] {
+  const clause = node.importClause;
+  if (clause === undefined) return [];
+  const symbols: string[] = [];
+  if (clause.name !== undefined) symbols.push("default");
+  if (clause.namedBindings !== undefined) {
+    if (ts.isNamespaceImport(clause.namedBindings)) symbols.push("*");
+    else {
+      for (const element of clause.namedBindings.elements) {
+        symbols.push(element.propertyName?.text ?? element.name.text);
+      }
+    }
+  }
+  return [...new Set(symbols)].sort(compareText);
+}
+
 function packageName(specifier: string): string {
   if (specifier.startsWith("node:")) return specifier;
   if (specifier.startsWith("@")) return specifier.split("/").slice(0, 2).join("/");
@@ -428,7 +444,12 @@ function checkImports(
     const importLocation = location(root, sourceFile, entry.node.moduleSpecifier);
     const targetFeature = entry.resolved === undefined ? null : featureNameFor(root, entry.resolved);
     if (sourceFeature !== null && targetFeature !== null && sourceFeature !== targetFeature) {
-      output.dependencies.push({ from: sourceFeature, to: targetFeature, ...importLocation });
+      output.dependencies.push({
+        from: sourceFeature,
+        to: targetFeature,
+        symbols: importedPublicSymbols(entry.node),
+        ...importLocation,
+      });
       const targetBase = path.basename(entry.resolved ?? "");
       if (!/^index\.tsx?$/.test(targetBase)) {
         output.diagnostics.push(diagnostic(
@@ -736,15 +757,22 @@ function compareLocated(a: { readonly file: string; readonly line: number }, b: 
 }
 
 function uniqueDependencies(dependencies: readonly DependencyManifest[]): DependencyManifest[] {
-  const seen = new Set<string>();
-  return [...dependencies]
-    .sort((a, b) => compareText(a.from, b.from) || compareText(a.to, b.to) || compareLocated(a, b))
-    .filter((entry) => {
-      const key = `${entry.from}\0${entry.to}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+  const grouped = new Map<string, { entry: DependencyManifest; symbols: Set<string> }>();
+  const sorted = [...dependencies]
+    .sort((a, b) => compareText(a.from, b.from) || compareText(a.to, b.to) || compareLocated(a, b));
+  for (const entry of sorted) {
+    const key = `${entry.from}\0${entry.to}`;
+    const current = grouped.get(key);
+    if (current === undefined) {
+      grouped.set(key, { entry, symbols: new Set(entry.symbols) });
+      continue;
+    }
+    for (const symbol of entry.symbols) current.symbols.add(symbol);
+  }
+  return [...grouped.values()].map(({ entry, symbols }) => ({
+    ...entry,
+    symbols: [...symbols].sort(compareText),
+  }));
 }
 
 export function analyzeApplication(applicationRoot: string, options: AnalyzeApplicationOptions = {}): ArchitectureManifest {
