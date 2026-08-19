@@ -2,6 +2,26 @@
   "name": "typescript-on-rails",
   "version": "0.1.0",
   "description": "An agent-native TypeScript framework for coherent full-stack applications.",
+  "keywords": [
+    "typescript",
+    "framework",
+    "architecture",
+    "agent-native",
+    "static-analysis"
+  ],
+  "license": "MIT",
+  "author": "Sam Millunchick",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smillunchick/typescript-on-rails.git"
+  },
+  "bugs": {
+    "url": "https://github.com/smillunchick/typescript-on-rails/issues"
+  },
+  "homepage": "https://github.com/smillunchick/typescript-on-rails#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -31,16 +51,20 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
     "build": "tsc -p tsconfig.json",
     "emit": "tsc -p tsconfig.json --noCheck",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p examples/reference-saas/tsconfig.json",
     "test": "node --import tsx --test test/*.test.ts && npm --prefix examples/reference-saas run test:app",
     "architecture:check": "node dist/bin.js check",
     "reference:check": "npm --prefix examples/reference-saas run check",
-    "check": "npm run typecheck && npm test && npm run emit && npm run architecture:check && npm run reference:check"
+    "check": "npm run typecheck && npm test && npm run emit && npm run architecture:check && npm run reference:check",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run check"
   },
   "dependencies": {
     "typescript": "^5.9.3"
