@@ -757,6 +757,7 @@ function sourceIsVendor(root: string, fileName: string): boolean {
   if (isInfra(root, fileName)) return true;
   const normalized = slash(fileName);
   return normalized.includes("/node_modules/")
+    && !normalized.includes(`/node_modules/${FRAMEWORK_PACKAGE}/`)
     && !normalized.includes("/node_modules/typescript/")
     && !normalized.includes("/node_modules/@types/");
 }

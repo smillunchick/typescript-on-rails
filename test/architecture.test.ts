@@ -262,6 +262,45 @@ export { future };
     assert.equal(manifest.exceptions.filter((entry) => entry.valid).length, 1);
   });
 
+  it("does not classify the installed framework's declarations as vendor types", async () => {
+    const fixture = await createAppFixture({
+      "node_modules/typescript-on-rails/package.json": `{"name":"typescript-on-rails","type":"module","types":"index.d.ts"}`,
+      "node_modules/typescript-on-rails/index.d.ts": `
+export interface FrameworkOperation {
+  readonly kind: "operation";
+  execute(input: unknown): Promise<unknown>;
+}
+export function object(fields: Readonly<Record<string, unknown>>): Readonly<Record<string, unknown>>;
+export function action(definition: {
+  readonly input: unknown;
+  readonly public: true;
+  readonly run: () => unknown;
+}): FrameworkOperation;
+`,
+      "src/features/health/index.ts": `
+import { action, object } from "typescript-on-rails";
+export const health = action({ input: object({}), public: true, run: () => "ok" });
+`,
+    });
+    fixtures.push(fixture);
+    await fixture.write("tsconfig.json", `${JSON.stringify({
+      compilerOptions: {
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        strict: true,
+        noEmit: true,
+      },
+      include: ["src/**/*.ts"],
+    }, null, 2)}\n`);
+
+    const manifest = analyzeApplication(fixture.root);
+
+    assert.ok(!manifest.diagnostics.some((entry) => (
+      entry.rule === "vendor-type-leak" && entry.target === "health"
+    )));
+  });
+
   it("traces public vendor types without an arbitrary depth limit", async () => {
     const manifest = await analyze({
       "node_modules/vendor-sdk/package.json": `{"name":"vendor-sdk","types":"index.d.ts"}`,
