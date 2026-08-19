@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { analyzeApplication, type ArchitectureManifest } from "../src/architecture/index.js";
+import { analyzeApplication, type ArchitectureManifest } from "../src/features/architecture/index.js";
 import { createAppFixture, type AppFixture } from "./helpers/app-fixture.js";
 
 const fixtures: AppFixture[] = [];

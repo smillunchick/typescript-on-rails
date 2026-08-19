@@ -21,6 +21,7 @@ export async function createAppFixture(files: Readonly<Record<string, string>>):
       baseUrl: ".",
       typeRoots: [path.resolve("node_modules/@types")],
       paths: {
+        "@/features/*": ["src/features/*/index.ts"],
         "@/*": ["src/*"],
         "typescript-on-rails": [frameworkEntry],
       },

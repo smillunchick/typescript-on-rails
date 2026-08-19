@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "bin": {
-    "app": "./dist/cli/bin.js"
+    "app": "./dist/bin.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -17,12 +17,16 @@
       "import": "./dist/index.js"
     },
     "./architecture": {
-      "types": "./dist/architecture/index.d.ts",
-      "import": "./dist/architecture/index.js"
+      "types": "./dist/features/architecture/index.d.ts",
+      "import": "./dist/features/architecture/index.js"
     },
     "./testing": {
-      "types": "./dist/testing/index.d.ts",
-      "import": "./dist/testing/index.js"
+      "types": "./dist/features/testing/index.d.ts",
+      "import": "./dist/features/testing/index.js"
+    },
+    "./tooling": {
+      "types": "./dist/features/tooling/index.d.ts",
+      "import": "./dist/features/tooling/index.js"
     }
   },
   "files": [
@@ -31,9 +35,12 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "node --import tsx --test test/*.test.ts",
-    "check": "npm run typecheck && npm test"
+    "emit": "tsc -p tsconfig.json --noCheck",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p examples/reference-saas/tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts && npm --prefix examples/reference-saas run test:app",
+    "architecture:check": "node dist/bin.js check",
+    "reference:check": "npm --prefix examples/reference-saas run check",
+    "check": "npm run typecheck && npm test && npm run emit && npm run architecture:check && npm run reference:check"
   },
   "dependencies": {
     "typescript": "^5.9.3"

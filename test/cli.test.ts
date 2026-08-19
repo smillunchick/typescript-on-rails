@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import ts from "typescript";
 
-import { runCli, type CliDependencies, type CommandInvocation } from "../src/cli/index.js";
+import { runCli, type CliDependencies, type CommandInvocation } from "../src/features/tooling/index.js";
 import { createAppFixture, type AppFixture } from "./helpers/app-fixture.js";
 
 const cleanup: Array<() => Promise<void>> = [];

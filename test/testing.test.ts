@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { analyzeApplication } from "../src/architecture/index.js";
+import { analyzeApplication } from "../src/features/architecture/index.js";
 import {
   assertArchitecture,
   executionContext,
   formatArchitectureDiagnostics,
-} from "../src/testing/index.js";
+} from "../src/features/testing/index.js";
 import { createAppFixture } from "./helpers/app-fixture.js";
 
 describe("testing helpers", () => {
