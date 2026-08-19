@@ -1,15 +1,14 @@
-import { object, query } from "typescript-on-rails";
+import { NotFound, object, query } from "typescript-on-rails";
 
-import { User, type UserRecord } from "./model.js";
-
-const currentUser: UserRecord = User.parse({
-  id: "user_1",
-  email: "owner@example.com",
-  role: "admin",
-});
+import type { AuthenticatedContext } from "./context.js";
+import { findUserForCustomer } from "./data.js";
 
 export const getCurrentUser = query({
   input: object({}),
   permission: "user.read",
-  run: () => currentUser,
+  run: (_input, context: AuthenticatedContext) => {
+    const user = findUserForCustomer(context.userId, context.customerId);
+    if (user === null) throw new NotFound();
+    return user;
+  },
 });

@@ -45,7 +45,33 @@ describe("events", () => {
       called = true;
     });
 
-    await assert.rejects(() => bus.emit(UserCreated, { userId: 1 }), InvalidInput);
+    await assert.rejects(
+      // @ts-expect-error Exercise runtime validation for an untyped event producer.
+      () => bus.emit(UserCreated, { userId: 1 }),
+      InvalidInput,
+    );
     assert.equal(called, false);
+  });
+
+  it("attempts every subscriber and aggregates delivery failures", async () => {
+    const bus = createEventBus();
+    const received: string[] = [];
+    bus.on(UserCreated, () => {
+      throw new Error("first subscriber failed");
+    });
+    bus.on(UserCreated, ({ userId }) => {
+      received.push(userId);
+    });
+
+    await assert.rejects(
+      () => bus.emit(UserCreated, { userId: "u1" }),
+      (error: unknown) => {
+        assert.ok(error instanceof AggregateError);
+        assert.match(error.message, /UserCreated/);
+        assert.equal(error.errors[0]?.message, "first subscriber failed");
+        return true;
+      },
+    );
+    assert.deepEqual(received, ["u1"]);
   });
 });

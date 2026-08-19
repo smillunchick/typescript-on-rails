@@ -1,5 +1,7 @@
 import { id, object, route } from "typescript-on-rails";
 
+import type { AuthenticatedContext } from "@/features/identity";
+
 import { getInvoice } from "./queries.js";
 
 export const invoiceRoute = route({
@@ -7,5 +9,5 @@ export const invoiceRoute = route({
   path: "/invoices/:invoiceId",
   input: object({ invoiceId: id("Invoice") }),
   permission: "invoice.read",
-  handler: (input, context) => getInvoice.execute(input, context),
+  handler: (input, context: AuthenticatedContext) => getInvoice.execute(input, context),
 });

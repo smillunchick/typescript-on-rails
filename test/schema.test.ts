@@ -93,9 +93,25 @@ describe("schemas", () => {
     });
   });
 
-  it("rejects non-finite numbers, invalid dates, and blank ids", () => {
-    assert.throws(() => number().parse(Number.POSITIVE_INFINITY), InvalidInput);
-    assert.throws(() => date().parse(new Date("invalid")), InvalidInput);
-    assert.throws(() => id().parse(""), InvalidInput);
+  it("rejects invalid primitive, collection, and money values", () => {
+    const invalidValues: ReadonlyArray<readonly [string, () => unknown]> = [
+      ["string", () => string().parse(12)],
+      ["finite number", () => number().parse(Number.POSITIVE_INFINITY)],
+      ["boolean", () => boolean().parse("true")],
+      ["date", () => date().parse(new Date("invalid"))],
+      ["blank id", () => id().parse(" \t ")],
+      ["negative money", () => money().parse(-1)],
+      ["fractional money", () => money().parse(1.5)],
+      ["unsafe money", () => money().parse(Number.MAX_SAFE_INTEGER + 1)],
+      ["enum", () => enumOf("open", "closed").parse("missing")],
+      ["literal", () => literal(false).parse(0)],
+      ["array", () => array(string()).parse({})],
+      ["object array", () => object({}).parse([])],
+      ["object null", () => object({}).parse(null)],
+    ];
+
+    for (const [name, parse] of invalidValues) {
+      assert.throws(parse, InvalidInput, name);
+    }
   });
 });

@@ -1,4 +1,5 @@
-export { approveInvoice, type InvoiceApproval } from "./actions.js";
+export { approveInvoice, payInvoice, type InvoiceApproval } from "./actions.js";
+export type { BillingContext } from "./context.js";
 export { InvoicePaid } from "./events.js";
 export { Invoice, type InvoiceRecord } from "./model.js";
 export { Payments } from "./payments.js";

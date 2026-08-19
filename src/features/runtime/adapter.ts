@@ -1,4 +1,10 @@
+import { architecture } from "./architecture.js";
 import type { Infer, Schema, SchemaMetadata } from "./schema.js";
+
+architecture.allow({
+  rule: "boring-typescript",
+  reason: "Runtime schema validation rebuilds the adapter contract's mapped operation type.",
+});
 
 type MaybePromise<TValue> = TValue | Promise<TValue>;
 
@@ -54,9 +60,22 @@ export function implementAdapter<const TOperations extends AdapterOperations>(
   contract: AdapterContract<TOperations>,
   implementation: AdapterImplementation<TOperations>,
 ): AdapterInstance<TOperations> {
+  const validatedOperations: Record<string, (input: unknown) => Promise<unknown>> = {};
+  for (const [name, operation] of Object.entries(contract.operations)) {
+    const implementedOperation: unknown = implementation[name];
+    if (typeof implementedOperation !== "function") {
+      throw new TypeError(`Adapter ${contract.name} must implement operation ${name}`);
+    }
+    validatedOperations[name] = async (input) => {
+      const parsedInput = operation.input.parse(input);
+      const output = await implementedOperation(parsedInput);
+      return operation.output.parse(output);
+    };
+  }
+
   return {
     contract,
-    operations: implementation,
+    operations: validatedOperations as AdapterImplementation<TOperations>,
     metadata: {
       kind: "adapter",
       name: contract.name,

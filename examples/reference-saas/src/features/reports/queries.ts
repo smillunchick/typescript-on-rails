@@ -1,11 +1,12 @@
 import { object, query } from "typescript-on-rails";
 
 import { listInvoices } from "@/features/billing";
+import type { AuthenticatedContext } from "@/features/identity";
 
 export const getRevenueReport = query({
   input: object({}),
   permission: "report.read",
-  run: async (_input, context) => {
+  run: async (_input, context: AuthenticatedContext) => {
     const invoices = await listInvoices.execute({}, context);
     return {
       invoiceCount: invoices.length,

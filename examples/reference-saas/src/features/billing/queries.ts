@@ -1,24 +1,20 @@
 import { id, object, query } from "typescript-on-rails";
 
-import { Invoice, type InvoiceRecord } from "./model.js";
+import type { AuthenticatedContext } from "@/features/identity";
 
-const invoices: readonly InvoiceRecord[] = [
-  Invoice.parse({
-    id: "invoice_1",
-    customerId: "customer_1",
-    status: "issued",
-    total: 12500,
-  }),
-];
+import { findInvoiceForCustomer, listInvoicesForCustomer } from "./data.js";
 
 export const getInvoice = query({
   input: object({ invoiceId: id("Invoice") }),
-  permission: "invoice.read",
-  run: ({ invoiceId }) => invoices.find((invoice) => invoice.id === invoiceId) ?? null,
+  authorize: ({ invoiceId }, context: AuthenticatedContext) => (
+    context.permissions.has("invoice.read")
+    && findInvoiceForCustomer(invoiceId, context.customerId) !== null
+  ),
+  run: ({ invoiceId }, context) => findInvoiceForCustomer(invoiceId, context.customerId),
 });
 
 export const listInvoices = query({
   input: object({}),
-  permission: "invoice.read",
-  run: () => invoices,
+  authorize: (_input, context: AuthenticatedContext) => context.permissions.has("invoice.read"),
+  run: (_input, context) => listInvoicesForCustomer(context.customerId),
 });

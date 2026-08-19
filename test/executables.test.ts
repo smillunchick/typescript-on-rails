@@ -110,6 +110,43 @@ describe("actions, queries, and routes", () => {
     assert.equal(show.metadata.kind, "route");
   });
 
+  it("enforces route permission access", async () => {
+    const show = route({
+      method: "GET",
+      path: "/secret/:key",
+      input: object({ key: string() }),
+      permission: "secret.read",
+      handler: ({ key }) => `value:${key}`,
+    });
+
+    await assert.rejects(() => show.execute({ key: "a" }, anonymous), Forbidden);
+    assert.equal(
+      await show.execute({ key: "a" }, { permissions: new Set(["secret.read"]) }),
+      "value:a",
+    );
+  });
+
+  it("allows and denies contextual route authorization", async () => {
+    interface OwnerContext extends ExecutionContext {
+      readonly userId: string;
+    }
+
+    const show = route({
+      method: "GET",
+      path: "/owners/:ownerId",
+      input: object({ ownerId: string() }),
+      authorize: (input, context: OwnerContext) => input.ownerId === context.userId,
+      handler: ({ ownerId }, context) => `${ownerId}:${context.userId}`,
+    });
+    const ownerContext = { userId: "u1", permissions: new Set<string>() };
+
+    await assert.rejects(
+      () => show.execute({ ownerId: "u2" }, ownerContext),
+      Forbidden,
+    );
+    assert.equal(await show.execute({ ownerId: "u1" }, ownerContext), "u1:u1");
+  });
+
   it("allows a route with no input declaration", async () => {
     const health = route({
       method: "GET",
@@ -123,7 +160,7 @@ describe("actions, queries, and routes", () => {
     assert.equal(health.metadata.input, undefined);
   });
 
-  it("rejects definitions with zero or multiple access decisions", () => {
+  it("rejects operation and route definitions with zero or multiple access decisions", () => {
     const unsafeAction = {
       input: object({}),
       run: () => undefined,
@@ -134,10 +171,26 @@ describe("actions, queries, and routes", () => {
       permission: "thing.do",
       run: () => undefined,
     };
+    const unsafeRoute = {
+      method: "GET" as const,
+      path: "/unsafe",
+      handler: () => undefined,
+    };
+    const ambiguousRoute = {
+      method: "GET" as const,
+      path: "/ambiguous",
+      public: true as const,
+      permission: "thing.read",
+      handler: () => undefined,
+    };
 
     // @ts-expect-error Exercise runtime protection for an untyped caller.
     assert.throws(() => action(unsafeAction), InvalidInput);
     // @ts-expect-error Exercise runtime protection for an untyped caller.
     assert.throws(() => action(ambiguousAction), InvalidInput);
+    // @ts-expect-error Exercise runtime protection for an untyped caller.
+    assert.throws(() => route(unsafeRoute), InvalidInput);
+    // @ts-expect-error Exercise runtime protection for an untyped caller.
+    assert.throws(() => route(ambiguousRoute), InvalidInput);
   });
 });

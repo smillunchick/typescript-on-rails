@@ -2,12 +2,14 @@ import { defineModel, enumOf, id, string, type ObjectOutput } from "typescript-o
 
 const userFields = {
   id: id("User"),
+  customerId: id("Customer"),
   email: string(),
   role: enumOf("member", "admin"),
 };
 
 export type UserRecord = ObjectOutput<typeof userFields>;
 export type UserId = UserRecord["id"];
+export type CustomerId = UserRecord["customerId"];
 
 export const User = defineModel({
   name: "User",

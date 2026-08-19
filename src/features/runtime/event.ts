@@ -29,7 +29,7 @@ export interface EventBus {
     eventDefinition: EventDefinition<TPayload>,
     handler: (payload: TPayload) => MaybePromise<void>,
   ): () => void;
-  emit<TPayload>(eventDefinition: EventDefinition<TPayload>, payload: unknown): Promise<void>;
+  emit<TPayload>(eventDefinition: EventDefinition<TPayload>, payload: TPayload): Promise<void>;
 }
 
 export function createEventBus(): EventBus {
@@ -50,8 +50,16 @@ export function createEventBus(): EventBus {
     },
     async emit(eventDefinition, payload) {
       const parsed = eventDefinition.payload.parse(payload);
+      const failures: unknown[] = [];
       for (const handler of subscriptions.get(eventDefinition) ?? []) {
-        await handler(parsed);
+        try {
+          await handler(parsed);
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(failures, `Event ${eventDefinition.name} delivery failed`);
       }
     },
   };

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  InvalidInput,
   boolean,
   defineAdapterContract,
   defineApp,
@@ -37,6 +38,57 @@ describe("adapters and app configuration", () => {
         },
       },
     });
+  });
+
+  it("enforces contract schemas and supports concurrent first use", async () => {
+    let invalidInputCalls = 0;
+    const validatedEmail = implementAdapter(Email, {
+      send: () => {
+        invalidInputCalls += 1;
+        return true;
+      },
+    });
+    await assert.rejects(
+      // @ts-expect-error Exercise input validation for an untyped adapter caller.
+      async () => validatedEmail.operations.send({ to: "a@example.com" }),
+      InvalidInput,
+    );
+    assert.equal(invalidInputCalls, 0);
+
+    let concurrentCalls = 0;
+    let releaseGate = (): void => {
+      throw new Error("Adapter gate was not initialized");
+    };
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const concurrentEmail = implementAdapter(Email, {
+      send: async ({ to, body }) => {
+        concurrentCalls += 1;
+        await gate;
+        return to.length > 0 && body.length > 0;
+      },
+    });
+    const first = concurrentEmail.operations.send({ to: "a@example.com", body: "One" });
+    const second = concurrentEmail.operations.send({ to: "b@example.com", body: "Two" });
+    assert.equal(concurrentCalls, 2);
+    releaseGate();
+    assert.deepEqual(await Promise.all([first, second]), [true, true]);
+
+    assert.throws(
+      // @ts-expect-error Exercise the runtime guard for an untyped adapter implementation.
+      () => implementAdapter(Email, {}),
+      /Adapter Email must implement operation send/,
+    );
+
+    const invalidOutput = implementAdapter(Email, {
+      // @ts-expect-error Exercise output validation for an untyped adapter implementation.
+      send: () => "accepted",
+    });
+    await assert.rejects(
+      async () => invalidOutput.operations.send({ to: "a@example.com", body: "Hi" }),
+      InvalidInput,
+    );
   });
 
   it("preserves explicit adapter configuration in an app", () => {
