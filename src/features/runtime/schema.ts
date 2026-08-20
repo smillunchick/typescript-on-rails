@@ -2,7 +2,9 @@ import { architecture } from "./architecture.js";
 import { InvalidInput, type ValidationIssue, type ValidationPathSegment } from "./errors.js";
 import {
   createSchema,
+  isRecord,
   normalizeSchema,
+  setOwn,
   type LiteralValue,
   type Schema,
   type SchemaMetadata,
@@ -53,19 +55,6 @@ function receivedType(value: unknown): string {
   if (Array.isArray(value)) return "array";
   if (value instanceof Date) return "date";
   return typeof value;
-}
-
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function setOwn<TValue>(target: Record<string, TValue>, key: string, value: TValue): void {
-  Object.defineProperty(target, key, {
-    value,
-    enumerable: true,
-    configurable: true,
-    writable: true,
-  });
 }
 
 function issue(

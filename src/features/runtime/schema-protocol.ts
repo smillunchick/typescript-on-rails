@@ -1,7 +1,7 @@
 import {
-  FrameworkError,
   InvalidInput,
   Unexpected,
+  normalizeError,
   type ValidationIssue,
   type ValidationPathSegment,
 } from "./errors.js";
@@ -91,7 +91,7 @@ const ADAPTER_ISSUE_MESSAGES: Readonly<Record<SchemaAdapterIssueCode, string>> =
   required: "Required value",
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -105,7 +105,7 @@ function ownKeys(value: Record<string, unknown>): readonly string[] {
   return Object.keys(value).sort();
 }
 
-function setOwn<TValue>(target: Record<string, TValue>, key: string, value: TValue): void {
+export function setOwn<TValue>(target: Record<string, TValue>, key: string, value: TValue): void {
   Object.defineProperty(target, key, {
     value,
     enumerable: true,
@@ -259,10 +259,6 @@ function isThenable(value: unknown): boolean {
     : false;
 }
 
-function unexpected(error: unknown): FrameworkError {
-  return error instanceof FrameworkError ? error : new Unexpected(undefined, { cause: error });
-}
-
 function parseProtocolResult<TValue>(
   descriptor: SchemaProtocolDescriptor<TValue>,
   value: unknown,
@@ -286,8 +282,50 @@ function parseProtocolResult<TValue>(
     }
     throw new InvalidInput(failure["message"], failure["issues"] as readonly ValidationIssue[]);
   } catch (error) {
-    throw unexpected(error);
+    throw normalizeError(error);
   }
+}
+
+function schemaFromCanonical<TValue, TMetadata extends SchemaMetadata>(
+  metadata: TMetadata,
+  parse: SchemaProtocolDescriptor<TValue, TMetadata>["parse"],
+  provenance: SchemaProvenance,
+): NormalizedSchema<TValue, TMetadata> {
+  const descriptor: SchemaProtocolDescriptor<TValue, TMetadata> = {
+    protocolVersion: SCHEMA_PROTOCOL_VERSION,
+    canonicalVersion: CANONICAL_SCHEMA_VERSION,
+    metadata,
+    parse,
+  };
+  return {
+    metadata,
+    provenance,
+    [SCHEMA_PROTOCOL_MARKER]: descriptor,
+    parse(input, path = []) {
+      return parseProtocolResult(descriptor, input, path);
+    },
+  };
+}
+
+function schemaFromThrowingParser<TValue, TMetadata extends SchemaMetadata>(
+  metadata: TMetadata,
+  parser: (value: unknown, path: readonly ValidationPathSegment[]) => TValue,
+  provenance: SchemaProvenance,
+): NormalizedSchema<TValue, TMetadata> {
+  return schemaFromCanonical(
+    metadata,
+    (value, path) => {
+      try {
+        return { success: true, value: parser(value, path) };
+      } catch (error) {
+        if (error instanceof InvalidInput) {
+          return { success: false, error: { message: error.message, issues: error.issues } };
+        }
+        throw error;
+      }
+    },
+    provenance,
+  );
 }
 
 function isExactLegacySchema(value: Record<string, unknown>): boolean {
@@ -324,20 +362,11 @@ export function normalizeSchema<TValue, TMetadata extends SchemaMetadata = Schem
       [SCHEMA_PROTOCOL_MARKER, "metadata"],
       new Set(),
     ) as TMetadata;
-    const normalizedDescriptor: SchemaProtocolDescriptor<TValue, TMetadata> = {
-      protocolVersion: SCHEMA_PROTOCOL_VERSION,
-      canonicalVersion: CANONICAL_SCHEMA_VERSION,
+    return schemaFromCanonical(
       metadata,
-      parse: descriptor["parse"] as SchemaProtocolDescriptor<TValue, TMetadata>["parse"],
-    };
-    return {
-      metadata,
-      provenance: "protocol",
-      [SCHEMA_PROTOCOL_MARKER]: normalizedDescriptor,
-      parse(input, path = []) {
-        return parseProtocolResult(normalizedDescriptor, input, path);
-      },
-    };
+      descriptor["parse"] as SchemaProtocolDescriptor<TValue, TMetadata>["parse"],
+      "protocol",
+    );
   }
 
   if (!isExactLegacySchema(value)) {
@@ -345,59 +374,29 @@ export function normalizeSchema<TValue, TMetadata extends SchemaMetadata = Schem
   }
   const metadata = canonicalMetadata(value["metadata"], ["metadata"], new Set()) as TMetadata;
   const legacyParse = value["parse"] as (input: unknown, path?: readonly ValidationPathSegment[]) => TValue;
-  const descriptor: SchemaProtocolDescriptor<TValue, TMetadata> = {
-    protocolVersion: SCHEMA_PROTOCOL_VERSION,
-    canonicalVersion: CANONICAL_SCHEMA_VERSION,
+  return schemaFromThrowingParser(
     metadata,
-    parse(input, path) {
-      try {
-        const parsed: unknown = legacyParse(input, path);
-        if (isThenable(parsed)) throw new Unexpected(undefined, { cause: new TypeError("Schema parser returned a thenable") });
-        return { success: true, value: parsed as TValue };
-      } catch (error) {
-        if (error instanceof InvalidInput) {
-          return { success: false, error: { message: error.message, issues: error.issues } };
-        }
-        throw error;
+    (input, path) => {
+      const parsed: unknown = legacyParse(input, path);
+      if (isThenable(parsed)) {
+        throw new Unexpected(undefined, { cause: new TypeError("Schema parser returned a thenable") });
       }
+      return parsed as TValue;
     },
-  };
-  return {
-    metadata,
-    provenance: "legacy",
-    [SCHEMA_PROTOCOL_MARKER]: descriptor,
-    parse(input, path = []) {
-      return parseProtocolResult(descriptor, input, path);
-    },
-  };
+    "legacy",
+  );
 }
 
 export function createSchema<TValue, const TMetadata extends SchemaMetadata>(
   metadata: TMetadata,
   parser: (value: unknown, path: readonly ValidationPathSegment[]) => TValue,
 ): NormalizedSchema<TValue, TMetadata> {
-  const descriptor: SchemaProtocolDescriptor<TValue, TMetadata> = {
-    protocolVersion: SCHEMA_PROTOCOL_VERSION,
-    canonicalVersion: CANONICAL_SCHEMA_VERSION,
+  const normalizedMetadata = canonicalMetadata(
     metadata,
-    parse(value, path) {
-      try {
-        return { success: true, value: parser(value, path) };
-      } catch (error) {
-        if (error instanceof InvalidInput) {
-          return { success: false, error: { message: error.message, issues: error.issues } };
-        }
-        throw error;
-      }
-    },
-  };
-  return normalizeSchema({
-    metadata,
-    [SCHEMA_PROTOCOL_MARKER]: descriptor,
-    parse(value, path = []) {
-      return parser(value, path);
-    },
-  });
+    [SCHEMA_PROTOCOL_MARKER, "metadata"],
+    new Set(),
+  ) as TMetadata;
+  return schemaFromThrowingParser(normalizedMetadata, parser, "protocol");
 }
 
 function normalizeAdapterIssue(
@@ -441,7 +440,7 @@ export function adaptSchema<
     throw declarationError(["mapError"], "Expected a schema error mapper");
   }
   const metadata = canonicalMetadata(definition.metadata, ["metadata"], new Set()) as TMetadata;
-  return createSchema(metadata, (value, path) => {
+  return schemaFromThrowingParser(metadata, (value, path) => {
     let result: unknown;
     try {
       result = definition.parse(value);
@@ -488,5 +487,5 @@ export function adaptSchema<
 
     // This framework-created error stays outside both vendor callback catches.
     throw new InvalidInput("Invalid input", issues);
-  });
+  }, "protocol");
 }

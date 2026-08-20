@@ -57,7 +57,7 @@ export function defineModel<const TFields extends SchemaFields>(definition: {
   const metadata: ModelMetadata = {
     kind: "model",
     name: definition.name,
-    fields: modelSchema.metadata.kind === "object" ? modelSchema.metadata.fields : {},
+    fields: modelSchema.metadata.fields,
     invariants: invariants.map((rule) => rule.name),
   };
 

@@ -142,14 +142,13 @@ async function rollbackApplicationScaffold(
   root: string,
   rootExisted: boolean,
   createdFiles: readonly string[],
-  createdSourceDirectory: boolean,
 ): Promise<void> {
   if (!rootExisted) {
     await fileSystem.removePath(root, true);
     return;
   }
   for (const file of createdFiles) await fileSystem.removePath(file, false);
-  if (createdSourceDirectory) await fileSystem.removePath(path.join(root, "src"), true);
+  await fileSystem.removePath(path.join(root, "src"), true);
 }
 
 export async function createApplication(
@@ -168,23 +167,18 @@ export async function createApplication(
     ["tsconfig.json", `${JSON.stringify(generatedTsconfig, null, 2)}\n`],
     ["src/app.ts", `import { defineApp } from "typescript-on-rails";\n\nexport default defineApp();\n`],
   ];
-  const absoluteFiles = files.map(([relative]) => path.join(root, relative));
   const createdFiles: string[] = [];
-  let createdSourceDirectory = false;
   try {
     if (!rootExisted) await fileSystem.createDirectory(root);
-    createdSourceDirectory = true;
     await fileSystem.createDirectory(path.join(root, "src", "features"));
-    for (let index = 0; index < files.length; index += 1) {
-      const entry = files[index];
-      const file = absoluteFiles[index];
-      if (entry === undefined || file === undefined) continue;
+    for (const [relative, content] of files) {
+      const file = path.join(root, relative);
       createdFiles.push(file);
-      await fileSystem.createFile(file, entry[1]);
+      await fileSystem.createFile(file, content);
     }
   } catch (error) {
     try {
-      await rollbackApplicationScaffold(fileSystem, root, rootExisted, createdFiles, createdSourceDirectory);
+      await rollbackApplicationScaffold(fileSystem, root, rootExisted, createdFiles);
     } catch (rollbackError) {
       throw new AggregateError([error, rollbackError], `Application scaffold failed and rollback was incomplete: ${target}`);
     }
