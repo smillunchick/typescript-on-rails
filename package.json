@@ -67,7 +67,7 @@
     "prepublishOnly": "npm run check"
   },
   "dependencies": {
-    "typescript": "^5.9.3"
+    "typescript": "5.9.3"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

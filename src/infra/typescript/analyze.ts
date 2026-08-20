@@ -3,6 +3,7 @@ import path from "node:path";
 import ts from "typescript";
 
 import { architecture } from "../../features/runtime/index.js";
+import { extractCallbackTypeContracts, type CallbackTypeContracts } from "./type-contract.js";
 import type {
   AdapterManifest,
   AnalyzeApplicationOptions,
@@ -77,6 +78,18 @@ interface MutableManifest {
   readonly dependencies: DependencyManifest[];
   readonly exceptions: ArchitectureExceptionManifest[];
   readonly diagnostics: ArchitectureDiagnostic[];
+}
+
+export interface AnalyzedCallbackTypeContract extends CallbackTypeContracts {
+  readonly name: string;
+  readonly kind: "operation" | "route";
+  readonly file: string;
+  readonly line: number;
+}
+
+export interface TypeContractAnalysis {
+  readonly manifest: ArchitectureManifest;
+  readonly callbacks: readonly AnalyzedCallbackTypeContract[];
 }
 
 interface FeatureRecord {
@@ -349,7 +362,13 @@ function contractSignature(
   return `{${entries.join(",")}}`;
 }
 
-function extractDeclarations(root: string, sourceFile: ts.SourceFile, output: MutableManifest): void {
+function extractDeclarations(
+  root: string,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  output: MutableManifest,
+  callbacks: AnalyzedCallbackTypeContract[],
+): void {
   const bindings = frameworkBindings(sourceFile);
   const feature = featureNameFor(root, sourceFile.fileName);
 
@@ -376,6 +395,12 @@ function extractDeclarations(root: string, sourceFile: ts.SourceFile, output: Mu
           ...location(root, sourceFile, node),
           ...(permission === null ? {} : { permission }),
         });
+        callbacks.push({
+          name: nameFromVariable,
+          kind: "operation",
+          ...location(root, sourceFile, node),
+          ...extractCallbackTypeContracts(checker, definition, "run"),
+        });
         if (permission !== null) output.permissions.add(permission);
       } else if (primitive === "route" && definition !== null && nameFromVariable !== null) {
         const permission = stringProperty(definition, "permission");
@@ -387,6 +412,12 @@ function extractDeclarations(root: string, sourceFile: ts.SourceFile, output: Mu
           contract: contractSignature(definition, bindings, ["input", "output"], true),
           ...location(root, sourceFile, node),
           ...(permission === null ? {} : { permission }),
+        });
+        callbacks.push({
+          name: nameFromVariable,
+          kind: "route",
+          ...location(root, sourceFile, node),
+          ...extractCallbackTypeContracts(checker, definition, "handler"),
         });
         if (permission !== null) output.permissions.add(permission);
       } else if (primitive === "event" && definition !== null) {
@@ -939,7 +970,10 @@ function uniqueDependencies(dependencies: readonly DependencyManifest[]): Depend
   }));
 }
 
-export function analyzeWithTypescript(applicationRoot: string, options: AnalyzeApplicationOptions = {}): ArchitectureManifest {
+export function analyzeTypeContractsWithTypescript(
+  applicationRoot: string,
+  options: AnalyzeApplicationOptions = {},
+): TypeContractAnalysis {
   const root = path.resolve(applicationRoot);
   const loaded = loadProgram(root, options);
   const checker = loaded.program.getTypeChecker();
@@ -956,13 +990,14 @@ export function analyzeWithTypescript(applicationRoot: string, options: AnalyzeA
     diagnostics: [],
   };
   const allowedExternalPackages = new Set(options.allowedExternalPackages ?? []);
+  const callbacks: AnalyzedCallbackTypeContract[] = [];
 
   for (const entry of [...loaded.configDiagnostics, ...ts.getPreEmitDiagnostics(loaded.program)]) {
     if (entry.file === undefined || inside(root, entry.file.fileName)) output.diagnostics.push(flattenTsDiagnostic(root, entry));
   }
   for (const sourceFile of files) extractAllowances(root, sourceFile, output);
   for (const sourceFile of files) {
-    extractDeclarations(root, sourceFile, output);
+    extractDeclarations(root, sourceFile, checker, output, callbacks);
     checkImports(root, sourceFile, checker, loaded.compilerOptions, allowedExternalPackages, output);
     checkBoringTypeScript(root, sourceFile, output);
   }
@@ -983,17 +1018,24 @@ export function analyzeWithTypescript(applicationRoot: string, options: AnalyzeA
   output.diagnostics.sort((a, b) => compareLocated(a, b) || compareText(a.rule, b.rule) || compareText(a.message, b.message));
 
   return {
-    version: 1,
-    root: slash(root),
-    features,
-    models: output.models,
-    operations: output.operations,
-    routes: output.routes,
-    events: output.events,
-    adapters: output.adapters,
-    permissions: [...output.permissions].sort(),
-    dependencies: output.dependencies,
-    exceptions: output.exceptions,
-    diagnostics: output.diagnostics,
+    manifest: {
+      version: 1,
+      root: slash(root),
+      features,
+      models: output.models,
+      operations: output.operations,
+      routes: output.routes,
+      events: output.events,
+      adapters: output.adapters,
+      permissions: [...output.permissions].sort(),
+      dependencies: output.dependencies,
+      exceptions: output.exceptions,
+      diagnostics: output.diagnostics,
+    },
+    callbacks: callbacks.sort((left, right) => compareNamed(left, right)),
   };
+}
+
+export function analyzeWithTypescript(applicationRoot: string, options: AnalyzeApplicationOptions = {}): ArchitectureManifest {
+  return analyzeTypeContractsWithTypescript(applicationRoot, options).manifest;
 }
