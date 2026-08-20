@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
 import {
   analyzeApplication,
   formatArchitectureDiagnostic,
@@ -53,6 +56,10 @@ export interface CliDependencies {
 
 const usage = `Usage: app <command> [options]
 
+TypeScript application architecture kernel and compiler with runtime contract primitives.
+Does not provide HTTP serving, rendered UI, persistence or storage, or bundling.
+No-emit TypeScript checks are not application builds.
+
 Commands:
   new <directory>
   dev | build | test
@@ -92,8 +99,40 @@ function formatList(values: readonly unknown[]): string {
   }).join("\n")}\n`;
 }
 
-async function lifecycle(command: "dev" | "build" | "test", cwd: string, runCommand: CommandRunner): Promise<number> {
-  return runCommand({ command: "npm", args: ["run", `${command}:app`], cwd });
+function isMissingFile(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null;
+}
+
+async function hasAppOwnedScript(cwd: string, script: string): Promise<boolean> {
+  let source: string;
+  try {
+    source = await readFile(path.join(cwd, "package.json"), "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw error;
+  }
+  const packageJson: unknown = JSON.parse(source);
+  if (!isRecord(packageJson)) return false;
+  const scripts = packageJson["scripts"];
+  return isRecord(scripts) && typeof scripts[script] === "string";
+}
+
+async function lifecycle(
+  command: "dev" | "build" | "test",
+  cwd: string,
+  stderr: CliStream,
+  runCommand: CommandRunner,
+): Promise<number> {
+  const script = `${command}:app`;
+  if (!(await hasAppOwnedScript(cwd, script))) {
+    stderr.write(`Missing app-owned script "${script}". The architecture kernel does not supply the ${command} lifecycle.\n`);
+    return 1;
+  }
+  return runCommand({ command: "npm", args: ["run", script], cwd });
 }
 
 async function runCheck(
@@ -271,7 +310,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
     }
     if (command === "dev" || command === "build" || command === "test") {
       if (rest.length !== 0) throw new CliUsageError(`Unexpected arguments for ${command}`);
-      return await lifecycle(command, cwd, runCommand);
+      return await lifecycle(command, cwd, stderr, runCommand);
     }
     if (command === "check") return await runCheck(rest, cwd, stdout, stderr, analyze, runCommand);
     if (command === "create") return await runCreate(rest, cwd, stdout);

@@ -1,7 +1,7 @@
 {
   "name": "typescript-on-rails",
   "version": "0.1.0",
-  "description": "An agent-native TypeScript framework for coherent full-stack applications.",
+  "description": "An agent-native TypeScript application architecture kernel and compiler with runtime contract primitives.",
   "keywords": [
     "typescript",
     "framework",

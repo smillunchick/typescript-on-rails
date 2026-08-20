@@ -1,6 +1,12 @@
 # typescript-on-rails
 
-An agent-native TypeScript framework that keeps application code organized by feature and makes architectural boundaries explicit.
+An agent-native TypeScript application architecture kernel and compiler with runtime contract primitives. It keeps application code organized by feature and makes architectural boundaries explicit.
+
+## Current scope
+
+The package provides architecture analysis, strict TypeScript conventions, application structure, generators, introspection, and runtime contract primitives.
+
+It does not provide HTTP serving, rendered UI, persistence or storage, or bundling. Applications own those runtime layers and their development, build, and test scripts. No-emit TypeScript checks are not application builds.
 
 ## Install
 

@@ -113,17 +113,15 @@ const generatedPackage = {
   version: "0.1.0",
   type: "module",
   scripts: {
-    "dev:app": "tsx watch src/app.ts",
-    "build:app": "tsc -p tsconfig.json",
-    "test:app": "node --import tsx --test test/*.test.ts",
+    check: "app check",
+    typecheck: "tsc -p tsconfig.json",
   },
   dependencies: {
     "typescript-on-rails": "^0.1.0",
   },
   devDependencies: {
     "@types/node": "^24.10.0",
-    tsx: "^4.20.6",
-    typescript: "^5.9.3",
+    typescript: "5.9.3",
   },
 };
 

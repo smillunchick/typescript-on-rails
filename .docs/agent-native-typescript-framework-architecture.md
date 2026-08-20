@@ -1,9 +1,17 @@
-# Agent-Native TypeScript Framework
+# Agent-Native TypeScript Application Architecture Vision
 ## High-Level Architectural Plan
+
+## Current shipped scope
+
+The shipped product is an application architecture kernel and compiler with runtime contract primitives. It provides architecture analysis, strict TypeScript conventions, application structure, generators, and introspection.
+
+It does not provide HTTP serving, rendered UI, persistence or storage, or bundling. Applications own those runtime layers and their development, build, and test scripts. No-emit TypeScript checks are not application builds.
+
+This document also describes a long-term architecture framework vision. HTTP, UI, persistence, storage, and bundling discussed below are future directions, not features of the shipped package.
 
 ## 1. Premise
 
-Build a full-stack TypeScript framework designed around one unusually strict idea:
+Explore a long-term full-stack TypeScript architecture framework designed around one unusually strict idea:
 
 > **The easiest way to build an application should also be the correct way to build it.**
 
@@ -302,9 +310,9 @@ That one convention creates enormous architectural leverage.
 
 ---
 
-# 6. Full-Stack by Default
+# 6. Long-Term Full-Stack Vision
 
-A feature should be allowed to span the complete application stack.
+A future architecture framework should allow a feature to span the complete application stack.
 
 For example, `projects` may own:
 
@@ -795,6 +803,8 @@ app owners
 app boundaries
 app exceptions
 ```
+
+In the shipped kernel, `app check` performs architecture checks. `app dev`, `app build`, and `app test` only delegate to matching app-owned scripts; the kernel does not supply those lifecycles.
 
 Avoid dozens of generators.
 
@@ -1472,11 +1482,11 @@ Framework features that violate them should face a very high bar.
 
 ---
 
-# 39. Initial Scope
+# 39. Long-Term Product Scope
 
-The first version should not attempt to solve every category of software.
+A future full-stack version should not attempt to solve every category of software.
 
-A sensible initial target would be:
+A sensible future target would be:
 
 > **Full-stack database-backed web applications and SaaS products.**
 

@@ -94,6 +94,28 @@ async function assertGeneratedTypechecks(root: string): Promise<void> {
   assert.deepEqual(diagnostics.map((entry) => ts.flattenDiagnosticMessageText(entry.messageText, " ")), []);
 }
 
+describe("shipped product positioning", () => {
+  it("describes the current architecture kernel and its explicit limits", async () => {
+    const packageJson = JSON.parse(await readFile(path.resolve("package.json"), "utf8"));
+    const readme = await readFile(path.resolve("README.md"), "utf8");
+    const vision = await readFile(path.resolve(".docs/agent-native-typescript-framework-architecture.md"), "utf8");
+
+    assert.equal(
+      packageJson.description,
+      "An agent-native TypeScript application architecture kernel and compiler with runtime contract primitives.",
+    );
+    for (const documentation of [readme, vision]) {
+      assert.match(documentation, /application architecture kernel/i);
+      assert.match(documentation, /HTTP serving/);
+      assert.match(documentation, /rendered UI/);
+      assert.match(documentation, /persistence/);
+      assert.match(documentation, /storage/);
+      assert.match(documentation, /bundling/);
+      assert.match(documentation, /no-emit TypeScript checks are not application builds/i);
+    }
+  });
+});
+
 describe("app CLI checks and lifecycle", () => {
   it("reports check success and failure, stable JSON, and optional tests", async () => {
     const healthy = await fixture({ "src/features/health/index.ts": "export const healthy = true;" });
@@ -132,6 +154,13 @@ describe("app CLI checks and lifecycle", () => {
   it("delegates lifecycle commands to explicit app-owned scripts", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "tor-cli-life-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
+    await writeFile(path.join(root, "package.json"), JSON.stringify({
+      scripts: {
+        "dev:app": "node dev.js",
+        "build:app": "node build.js",
+        "test:app": "node test.js",
+      },
+    }));
     const calls: CommandInvocation[] = [];
     const runCommand = async (invocation: CommandInvocation) => {
       calls.push(invocation);
@@ -144,7 +173,29 @@ describe("app CLI checks and lifecycle", () => {
     assert.deepEqual(calls.map((entry) => entry.args), [["run", "dev:app"], ["run", "build:app"], ["run", "test:app"]]);
   });
 
-  it("prints concise usage for unknown or invalid input", async () => {
+  it("reports a missing app-owned lifecycle before launching npm", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "tor-cli-missing-life-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ scripts: { typecheck: "tsc --noEmit" } }));
+    const calls: CommandInvocation[] = [];
+
+    const result = await invoke(["dev"], root, {
+      runCommand: async (invocation) => {
+        calls.push(invocation);
+        return 0;
+      },
+    });
+
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, "");
+    assert.equal(
+      result.stderr,
+      "Missing app-owned script \"dev:app\". The architecture kernel does not supply the dev lifecycle.\n",
+    );
+    assert.deepEqual(calls, []);
+  });
+
+  it("prints concise, truthful usage for unknown or invalid input", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "tor-cli-usage-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const unknown = await invoke(["wat"], root);
@@ -152,6 +203,9 @@ describe("app CLI checks and lifecycle", () => {
     assert.equal(unknown.code, 2);
     assert.equal(invalid.code, 2);
     assert.match(unknown.stderr, /^Usage: app /);
+    assert.match(unknown.stderr, /application architecture kernel and compiler with runtime contract primitives/i);
+    assert.match(unknown.stderr, /Does not provide HTTP serving, rendered UI, persistence or storage, or bundling\./);
+    assert.match(unknown.stderr, /No-emit TypeScript checks are not application builds\./);
     assert.equal(unknown.stdout, "");
   });
 });
@@ -205,7 +259,13 @@ describe("app scaffold and generators", () => {
     assert.equal(created.code, 0, created.stderr);
     const packageJson = JSON.parse(await readFile(path.join(parent, "shop", "package.json"), "utf8"));
     assert.equal(packageJson.dependencies["typescript-on-rails"], "^0.1.0");
-    assert.deepEqual(Object.keys(packageJson.scripts).sort(), ["build:app", "dev:app", "test:app"]);
+    assert.deepEqual(packageJson.scripts, {
+      check: "app check",
+      typecheck: "tsc -p tsconfig.json",
+    });
+    assert.equal(packageJson.devDependencies.typescript, "5.9.3");
+    assert.equal(packageJson.devDependencies.tsx, undefined);
+    assert.equal(packageJson.dependencies.tsx, undefined);
     assert.match(await readFile(path.join(parent, "shop", "tsconfig.json"), "utf8"), /NodeNext/);
     assert.match(await readFile(path.join(parent, "shop", "src", "app.ts"), "utf8"), /defineApp/);
 
