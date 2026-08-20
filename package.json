@@ -23,6 +23,11 @@
     "access": "public"
   },
   "type": "module",
+  "typescriptOnRails": {
+    "packageCapabilities": {
+      "typescript": "host-io"
+    }
+  },
   "engines": {
     "node": ">=22"
   },

@@ -1,3 +1,5 @@
+export type PackageCapability = "pure" | "ui" | "external-system" | "host-io";
+
 export interface ArchitectureAllowance {
   readonly kind: "architecture-allowance";
   readonly rule: string;

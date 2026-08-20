@@ -1,4 +1,3 @@
-import { builtinModules } from "node:module";
 import path from "node:path";
 import ts from "typescript";
 
@@ -8,6 +7,11 @@ import {
   CANONICAL_SCHEMA_VERSION,
   SCHEMA_PROTOCOL_VERSION,
 } from "../../features/runtime/index.js";
+import {
+  runtimePackageIdentity,
+  selectPackagePolicy,
+  type PackagePolicyEntry,
+} from "../project/package-policy.js";
 import {
   extractAdapterOperationsFacet,
   extractRuntimeSchemaFacet,
@@ -32,6 +36,8 @@ import type {
   FeatureManifest,
   ModelManifest,
   OperationManifest,
+  PackagePolicyManifest,
+  PackageUseManifest,
   PublicExportManifest,
   RouteManifest,
   SemanticIdOwner,
@@ -46,32 +52,6 @@ architecture.allow({
 });
 
 const FRAMEWORK_PACKAGE = "typescript-on-rails";
-const EXTERNAL_IO_NODE_MODULES = new Set([
-  "child_process",
-  "cluster",
-  "dgram",
-  "dns",
-  "fs",
-  "fs/promises",
-  "http",
-  "http2",
-  "https",
-  "inspector",
-  "module",
-  "net",
-  "process",
-  "readline",
-  "readline/promises",
-  "repl",
-  "sqlite",
-  "tls",
-  "trace_events",
-  "v8",
-  "vm",
-  "wasi",
-  "worker_threads",
-]);
-const NODE_MODULES = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
 
 const RULE_CODES: Readonly<Record<string, string>> = {
   "architecture-allowance": "ARCH001",
@@ -80,7 +60,7 @@ const RULE_CODES: Readonly<Record<string, string>> = {
   "feature-cycle": "ARCH004",
   "runtime-boundary": "ARCH005",
   "domain-ui": "ARCH006",
-  "external-io": "ARCH007",
+  "package-capability": "ARCH007",
   "vendor-type-leak": "ARCH008",
   "boring-typescript": "ARCH009",
   "public-api-type": "ARCH010",
@@ -90,6 +70,7 @@ const RULE_CODES: Readonly<Record<string, string>> = {
   "semantic-identity": "ARCH014",
   "adapter-link": "ARCH015",
   "contract-extraction": "ARCH016",
+  "package-policy": "ARCH017",
 };
 
 interface PendingAdapterLink {
@@ -109,6 +90,9 @@ interface MutableManifest {
   readonly diagnostics: ArchitectureDiagnostic[];
   readonly adapterContracts: Map<ts.Symbol, string>;
   readonly pendingAdapterLinks: PendingAdapterLink[];
+  readonly packagePolicy: PackagePolicyManifest[];
+  readonly packageUses: PackageUseManifest[];
+  readonly unknownPackages: Map<string, SourceLocation[]>;
 }
 
 export interface AnalyzedCallbackTypeContract extends CallbackTypeContracts {
@@ -173,6 +157,7 @@ function diagnostic(
     readonly suggestion?: string;
     readonly target?: string;
     readonly related?: readonly SourceLocation[];
+    readonly packageCapabilityMigration?: ArchitectureDiagnostic["packageCapabilityMigration"];
   } = {},
 ): ArchitectureDiagnostic {
   return {
@@ -185,6 +170,9 @@ function diagnostic(
     ...(options.suggestion === undefined ? {} : { suggestion: options.suggestion }),
     ...(options.target === undefined ? {} : { target: options.target }),
     ...(options.related === undefined ? {} : { related: options.related }),
+    ...(options.packageCapabilityMigration === undefined
+      ? {}
+      : { packageCapabilityMigration: options.packageCapabilityMigration }),
   };
 }
 
@@ -712,7 +700,8 @@ function moduleReferencesFor(sourceFile: ts.SourceFile, compilerOptions: ts.Comp
     if (ts.isImportDeclaration(statement)) {
       const clause = statement.importClause;
       typeOnly = clause?.isTypeOnly === true
-        || (clause?.namedBindings !== undefined
+        || (clause?.name === undefined
+          && clause?.namedBindings !== undefined
           && ts.isNamedImports(clause.namedBindings)
           && clause.namedBindings.elements.length > 0
           && clause.namedBindings.elements.every((entry) => entry.isTypeOnly));
@@ -745,10 +734,33 @@ function referencedPublicSymbols(node: ModuleReference): string[] {
   return [...new Set(symbols)].sort(compareText);
 }
 
-function packageName(specifier: string): string {
-  if (specifier.startsWith("node:")) return specifier;
-  if (specifier.startsWith("@")) return specifier.split("/").slice(0, 2).join("/");
-  return specifier.split("/")[0] ?? specifier;
+function packagePolicyMap(entries: readonly PackagePolicyEntry[]): ReadonlyMap<string, PackagePolicyEntry["capability"]> {
+  return new Map(entries.map((entry) => [entry.package, entry.capability]));
+}
+
+function effectiveSourceRole(
+  root: string,
+  sourceFile: ts.SourceFile,
+  role: ReturnType<typeof pathRole>,
+): "infrastructure" | "ui/client" | "domain" | "application" {
+  if (isInfra(root, sourceFile.fileName)) return "infrastructure";
+  if (role.client || role.ui || hasUseClient(sourceFile)) return "ui/client";
+  return role.domain ? "domain" : "application";
+}
+
+function requiredCapabilityBoundary(capability: PackagePolicyEntry["capability"]): string {
+  if (capability === "pure") return "all current source roles";
+  if (capability === "ui") return "UI/client code only";
+  return "infrastructure code only";
+}
+
+function capabilityAllowed(
+  capability: PackagePolicyEntry["capability"],
+  role: ReturnType<typeof effectiveSourceRole>,
+): boolean {
+  if (capability === "pure") return true;
+  if (capability === "ui") return role === "ui/client";
+  return role === "infrastructure";
 }
 
 function isInfra(root: string, fileName: string): boolean {
@@ -812,7 +824,8 @@ function checkImports(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   compilerOptions: ts.CompilerOptions,
-  allowedExternalPackages: ReadonlySet<string>,
+  policy: ReadonlyMap<string, PackagePolicyEntry["capability"]>,
+  blockedPackages: ReadonlySet<string>,
   output: MutableManifest,
 ): void {
   const sourceFeature = featureNameFor(root, sourceFile.fileName);
@@ -843,7 +856,8 @@ function checkImports(
     }
 
     const targetRole = entry.resolved === undefined ? null : pathRole(entry.resolved);
-    const nodeModule = NODE_MODULES.has(entry.specifier);
+    const packageIdentity = runtimePackageIdentity(entry.specifier);
+    const nodeModule = packageIdentity?.nodeCapability !== undefined;
     if (client && !entry.typeOnly) {
       const runtimeTargets = [
         ...(entry.resolved === undefined ? [] : [entry.resolved]),
@@ -875,25 +889,52 @@ function checkImports(
       ));
     }
 
-    const packageTarget = packageName(entry.specifier);
     const isInternal = entry.resolved !== undefined && inside(path.join(root, "src"), entry.resolved);
-    const externalIoNodeModule = EXTERNAL_IO_NODE_MODULES.has(entry.specifier.replace(/^node:/, ""));
-    const externalPackage = !entry.specifier.startsWith(".")
-      && !isInternal
-      && !nodeModule
-      && packageTarget !== FRAMEWORK_PACKAGE;
-    if (
-      !isInfra(root, sourceFile.fileName)
-      && !allowedExternalPackages.has(packageTarget)
-      && !entry.typeOnly
-      && (externalIoNodeModule || externalPackage)
-    ) {
+    if (entry.typeOnly || isInternal) continue;
+    if (packageIdentity === null) {
+      if (!entry.specifier.startsWith(".") && !entry.specifier.startsWith("/")) {
+        output.diagnostics.push(diagnostic(
+          "package-capability",
+          `Runtime module specifier ${JSON.stringify(entry.specifier)} cannot be mapped to an exact package capability key`,
+          importLocation.file,
+          importLocation.line,
+          {
+            suggestion: "Import the external package by its package root or exact subpath",
+            target: entry.specifier,
+          },
+        ));
+      }
+      continue;
+    }
+    if (packageIdentity.framework) continue;
+
+    const blockedByPolicy = blockedPackages.has(packageIdentity.exact)
+      || (policy.get(packageIdentity.exact) === undefined && blockedPackages.has(packageIdentity.root));
+    if (blockedByPolicy && packageIdentity.nodeCapability === undefined) continue;
+
+    const capability = packageIdentity.nodeCapability
+      ?? policy.get(packageIdentity.exact)
+      ?? policy.get(packageIdentity.root);
+    if (capability === undefined) {
+      const uses = output.unknownPackages.get(packageIdentity.root) ?? [];
+      uses.push(importLocation);
+      output.unknownPackages.set(packageIdentity.root, uses);
+      continue;
+    }
+
+    output.packageUses.push({
+      package: packageIdentity.exact,
+      capability,
+      ...importLocation,
+    });
+    const role = effectiveSourceRole(root, sourceFile, sourceRole);
+    if (!capabilityAllowed(capability, role)) {
       output.diagnostics.push(diagnostic(
-        "external-io",
-        `External IO dependency ${entry.specifier} must be imported from src/infra`,
+        "package-capability",
+        `Package ${packageIdentity.exact} has capability ${capability}; current role ${role} requires ${requiredCapabilityBoundary(capability)}`,
         importLocation.file,
         importLocation.line,
-        { target: packageTarget },
+        { target: packageIdentity.exact },
       ));
     }
   }
@@ -1274,6 +1315,12 @@ function compareLocated(a: { readonly file: string; readonly line: number }, b: 
   return compareText(a.file, b.file) || a.line - b.line;
 }
 
+function comparePackageUse(a: PackageUseManifest, b: PackageUseManifest): number {
+  return compareText(a.package, b.package)
+    || compareText(a.capability, b.capability)
+    || compareLocated(a, b);
+}
+
 function compareSemantic(
   a: { readonly id: string | null; readonly name: string; readonly file: string; readonly line: number },
   b: { readonly id: string | null; readonly name: string; readonly file: string; readonly line: number },
@@ -1283,6 +1330,37 @@ function compareSemantic(
   return compareText(a.id ?? "", b.id ?? "")
     || compareText(a.name, b.name)
     || compareLocated(a, b);
+}
+
+function addUnknownPackageDiagnostic(output: MutableManifest): void {
+  const inventory = [...output.unknownPackages]
+    .sort(([left], [right]) => compareText(left, right))
+    .map(([packageName, uses]) => ({
+      package: packageName,
+      uses: [...new Map(
+        uses
+          .sort(compareLocated)
+          .map((entry) => [`${entry.file}\0${String(entry.line)}`, entry]),
+      ).values()],
+    }));
+  if (inventory.length === 0) return;
+
+  const packageCapabilities: Record<string, string> = {};
+  for (const entry of inventory) packageCapabilities[entry.package] = "CHOOSE: pure | ui | external-system | host-io";
+  const evidence = inventory
+    .map((entry) => `${entry.package}: ${entry.uses.map((use) => `${use.file}:${String(use.line)}`).join(", ")}`)
+    .join("; ");
+  const firstUse = inventory[0]?.uses[0] ?? { file: "package.json", line: 1 };
+  output.diagnostics.push(diagnostic(
+    "package-capability",
+    `Unknown runtime package capabilities. Inventory: ${evidence}. Starter packageCapabilities map (replace every CHOOSE value): ${JSON.stringify(packageCapabilities)}`,
+    firstUse.file,
+    firstUse.line,
+    {
+      ...(inventory.length === 1 && inventory[0] !== undefined ? { target: inventory[0].package } : {}),
+      packageCapabilityMigration: { inventory, packageCapabilities },
+    },
+  ));
 }
 
 function uniqueDependencies(dependencies: readonly DependencyManifest[]): DependencyManifest[] {
@@ -1312,6 +1390,9 @@ export function analyzeTypeContractsWithTypescript(
   const loaded = loadProgram(root, options);
   const checker = loaded.program.getTypeChecker();
   const files = loaded.program.getSourceFiles().filter((sourceFile) => isApplicationSource(root, sourceFile));
+  const selectedPolicy = selectPackagePolicy(root, options);
+  const policy = packagePolicyMap(selectedPolicy.entries);
+  const blockedPackages = new Set(selectedPolicy.blockedPackages);
   const output: MutableManifest = {
     models: [],
     operations: [],
@@ -1324,9 +1405,21 @@ export function analyzeTypeContractsWithTypescript(
     diagnostics: [],
     adapterContracts: new Map(),
     pendingAdapterLinks: [],
+    packagePolicy: [...selectedPolicy.entries],
+    packageUses: [],
+    unknownPackages: new Map(),
   };
-  const allowedExternalPackages = new Set(options.allowedExternalPackages ?? []);
   const callbacks: AnalyzedCallbackTypeContract[] = [];
+
+  for (const issue of selectedPolicy.issues) {
+    output.diagnostics.push(diagnostic(
+      "package-policy",
+      issue.message,
+      "package.json",
+      1,
+      issue.key === undefined ? {} : { target: issue.key },
+    ));
+  }
 
   for (const entry of [...loaded.configDiagnostics, ...ts.getPreEmitDiagnostics(loaded.program)]) {
     if (entry.file === undefined || inside(root, entry.file.fileName)) output.diagnostics.push(flattenTsDiagnostic(root, entry));
@@ -1334,7 +1427,7 @@ export function analyzeTypeContractsWithTypescript(
   for (const sourceFile of files) extractAllowances(root, sourceFile, output);
   for (const sourceFile of files) {
     extractDeclarations(root, sourceFile, checker, output, callbacks);
-    checkImports(root, sourceFile, checker, loaded.compilerOptions, allowedExternalPackages, output);
+    checkImports(root, sourceFile, checker, loaded.compilerOptions, policy, blockedPackages, output);
     checkBoringTypeScript(root, sourceFile, output);
   }
 
@@ -1357,6 +1450,8 @@ export function analyzeTypeContractsWithTypescript(
   addCycleDiagnostics(root, featureRecords, output);
   checkDuplicateOwners(output);
   applyAllowances(output);
+  // Unknown classifications cannot be waived because no capability can be emitted for them.
+  addUnknownPackageDiagnostic(output);
 
   features.sort(compareSemantic);
   output.models.sort(compareSemantic);
@@ -1365,6 +1460,8 @@ export function analyzeTypeContractsWithTypescript(
   output.events.sort(compareSemantic);
   output.adapters.sort(compareSemantic);
   output.exceptions.sort(compareLocated);
+  output.packagePolicy.sort((left, right) => compareText(left.package, right.package));
+  output.packageUses.sort(comparePackageUse);
   output.diagnostics.sort((a, b) => compareLocated(a, b) || compareText(a.rule, b.rule) || compareText(a.message, b.message));
 
   return {
@@ -1377,8 +1474,8 @@ export function analyzeTypeContractsWithTypescript(
         canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION,
         typeContractVersion: TYPE_CONTRACT_VERSION,
       },
-      packagePolicy: [],
-      packageUses: [],
+      packagePolicy: output.packagePolicy,
+      packageUses: output.packageUses,
       features,
       models: output.models,
       operations: output.operations,

@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "typescriptOnRails": {
+    "packageCapabilities": {}
+  },
   "scripts": {
     "check": "node ../../dist/bin.js check",
     "test:app": "node --import tsx --test test/*.test.ts",

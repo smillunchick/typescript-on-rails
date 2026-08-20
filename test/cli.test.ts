@@ -36,12 +36,13 @@ function git(cwd: string, args: readonly string[], input?: string): string {
 }
 
 function createBaseRef(root: string): void {
+  const packageBlob = git(root, ["hash-object", "-w", "package.json"]);
   const tsconfigBlob = git(root, ["hash-object", "-w", "tsconfig.json"]);
   const indexBlob = git(root, ["hash-object", "-w", "src/features/billing/index.ts"]);
   const billingTree = git(root, ["mktree"], `100644 blob ${indexBlob}\tindex.ts\n`);
   const featuresTree = git(root, ["mktree"], `040000 tree ${billingTree}\tbilling\n`);
   const srcTree = git(root, ["mktree"], `040000 tree ${featuresTree}\tfeatures\n`);
-  const rootTree = git(root, ["mktree"], `040000 tree ${srcTree}\tsrc\n100644 blob ${tsconfigBlob}\ttsconfig.json\n`);
+  const rootTree = git(root, ["mktree"], `100644 blob ${packageBlob}\tpackage.json\n040000 tree ${srcTree}\tsrc\n100644 blob ${tsconfigBlob}\ttsconfig.json\n`);
   const commit = git(root, ["commit-tree", rootTree, "-m", "base"]);
   git(root, ["update-ref", "refs/heads/main", commit]);
 }
@@ -119,7 +120,10 @@ describe("shipped product positioning", () => {
 describe("app CLI checks and lifecycle", () => {
   it("reports check success and failure, stable JSON, and optional tests", async () => {
     const healthy = await fixture({ "src/features/health/index.ts": "export const healthy = true;" });
-    await writeFile(path.join(healthy.root, "package.json"), JSON.stringify({ scripts: { "test:app": "node --test" } }));
+    await writeFile(path.join(healthy.root, "package.json"), JSON.stringify({
+      scripts: { "test:app": "node --test" },
+      typescriptOnRails: { packageCapabilities: {} },
+    }));
     const calls: CommandInvocation[] = [];
     const runCommand = async (invocation: CommandInvocation) => {
       calls.push(invocation);
@@ -149,6 +153,26 @@ describe("app CLI checks and lifecycle", () => {
     assert.equal(failure.stdout, "");
     assert.match(failure.stderr, /ARCH012/);
     assert.match(failure.stderr, /Create src\/features\/billing\/index\.ts/);
+  });
+
+  it("returns the unknown-package inventory and starter map in JSON diagnostics", async () => {
+    const app = await fixture({
+      "src/features/packages/index.ts": `import value from "unclassified/subpath"; export { value };`,
+    });
+
+    const result = await invoke(["check", "--json"], app.root);
+
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /Unknown runtime package capabilities/);
+    assert.match(result.stderr, /unclassified.*src\/features\/packages\/index\.ts:1/);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.ok, false);
+    assert.deepEqual(output.diagnostics.find((entry: { readonly packageCapabilityMigration?: unknown }) => (
+      entry.packageCapabilityMigration !== undefined
+    )).packageCapabilityMigration, {
+      inventory: [{ package: "unclassified", uses: [{ file: "src/features/packages/index.ts", line: 1 }] }],
+      packageCapabilities: { unclassified: "CHOOSE: pure | ui | external-system | host-io" },
+    });
   });
 
   it("delegates lifecycle commands to explicit app-owned scripts", async () => {
@@ -263,6 +287,7 @@ describe("app scaffold and generators", () => {
       check: "app check",
       typecheck: "tsc -p tsconfig.json",
     });
+    assert.deepEqual(packageJson.typescriptOnRails.packageCapabilities, {});
     assert.equal(packageJson.devDependencies.typescript, "5.9.3");
     assert.equal(packageJson.devDependencies.tsx, undefined);
     assert.equal(packageJson.dependencies.tsx, undefined);

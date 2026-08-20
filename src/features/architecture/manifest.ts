@@ -1,4 +1,4 @@
-import type { SchemaMetadata } from "../runtime/index.js";
+import type { PackageCapability, SchemaMetadata } from "../runtime/index.js";
 import type { SemanticIdOwner } from "./semantic-id.js";
 
 export type TypeContractPrimitive = "bigint" | "boolean" | "number" | "string" | "symbol";
@@ -115,8 +115,6 @@ export interface ManifestCompilerMetadata {
   readonly typeContractVersion: 1;
 }
 
-export type PackageCapability = "pure" | "ui" | "external-system" | "host-io";
-
 export interface PackagePolicyManifest {
   readonly package: string;
   readonly capability: PackageCapability;
@@ -134,6 +132,16 @@ export interface SourceLocation {
   readonly line: number;
 }
 
+export interface UnknownPackageInventoryEntry {
+  readonly package: string;
+  readonly uses: readonly SourceLocation[];
+}
+
+export interface PackageCapabilityMigration {
+  readonly inventory: readonly UnknownPackageInventoryEntry[];
+  readonly packageCapabilities: Readonly<Record<string, string>>;
+}
+
 export interface ArchitectureDiagnostic extends SourceLocation {
   readonly code: string;
   readonly rule: string;
@@ -142,6 +150,7 @@ export interface ArchitectureDiagnostic extends SourceLocation {
   readonly suggestion?: string;
   readonly target?: string;
   readonly related?: readonly SourceLocation[];
+  readonly packageCapabilityMigration?: PackageCapabilityMigration;
 }
 
 interface SemanticManifestRecord extends SourceLocation {
@@ -232,5 +241,5 @@ export interface ArchitectureManifest {
 
 export interface AnalyzeApplicationOptions {
   readonly tsconfig?: string;
-  readonly allowedExternalPackages?: readonly string[];
+  readonly packageCapabilities?: Readonly<Record<string, PackageCapability>>;
 }

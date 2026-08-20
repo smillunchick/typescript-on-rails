@@ -8,7 +8,14 @@ export interface AppFixture {
   cleanup(): Promise<void>;
 }
 
-export async function createAppFixture(files: Readonly<Record<string, string>>): Promise<AppFixture> {
+export interface AppFixtureOptions {
+  readonly packageJson?: "default" | "missing";
+}
+
+export async function createAppFixture(
+  files: Readonly<Record<string, string>>,
+  options: AppFixtureOptions = {},
+): Promise<AppFixture> {
   const root = await mkdtemp(path.join(tmpdir(), "typescript-on-rails-"));
   const frameworkEntry = path.resolve("src/index.ts");
   const tsconfig = {
@@ -30,6 +37,12 @@ export async function createAppFixture(files: Readonly<Record<string, string>>):
   };
 
   await writeFile(path.join(root, "tsconfig.json"), `${JSON.stringify(tsconfig, null, 2)}\n`);
+  if (options.packageJson !== "missing") {
+    await writeFile(path.join(root, "package.json"), `${JSON.stringify({
+      private: true,
+      typescriptOnRails: { packageCapabilities: {} },
+    }, null, 2)}\n`);
+  }
   const fixture: AppFixture = {
     root,
     async write(relativePath, content) {

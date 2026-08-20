@@ -22,6 +22,7 @@ export type {
   OperationAccess,
   OperationManifest,
   PackageCapability,
+  PackageCapabilityMigration,
   PackagePolicyManifest,
   PackageUseManifest,
   RuntimeSchemaFacet,
@@ -36,6 +37,7 @@ export type {
   TypeContractPrimitive,
   TypeContractProperty,
   TypeContractTupleElement,
+  UnknownPackageInventoryEntry,
 } from "./features/architecture/index.js";
 export * from "./features/introspection/index.js";
 export * from "./features/runtime/index.js";

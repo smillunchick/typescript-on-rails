@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 
-import { analyzeApplication, type ArchitectureManifest } from "../src/features/architecture/index.js";
+import {
+  analyzeApplication,
+  type AnalyzeApplicationOptions,
+  type ArchitectureManifest,
+  type PackageCapability,
+} from "../src/features/architecture/index.js";
 import { createAppFixture, type AppFixture } from "./helpers/app-fixture.js";
 
 const fixtures: AppFixture[] = [];
@@ -9,10 +16,21 @@ afterEach(async () => {
   await Promise.all(fixtures.splice(0).map((fixture) => fixture.cleanup()));
 });
 
-async function analyze(files: Readonly<Record<string, string>>): Promise<ArchitectureManifest> {
+async function analyze(
+  files: Readonly<Record<string, string>>,
+  options?: AnalyzeApplicationOptions,
+): Promise<ArchitectureManifest> {
   const fixture = await createAppFixture(files);
   fixtures.push(fixture);
-  return analyzeApplication(fixture.root);
+  return analyzeApplication(fixture.root, options);
+}
+
+function policyPackageJson(packageCapabilities: Readonly<Record<string, unknown>>): string {
+  return JSON.stringify({ private: true, typescriptOnRails: { packageCapabilities } });
+}
+
+function capabilities(entries: Readonly<Record<string, PackageCapability>>): AnalyzeApplicationOptions {
+  return { packageCapabilities: entries };
 }
 
 function rules(manifest: ArchitectureManifest): string[] {
@@ -99,13 +117,13 @@ export const email = implementAdapter(Email, { send: () => true });
       "src/features/star/index.ts": `export * from "../billing/actions.js";`,
       "src/features/vendor/index.ts": `export { vendorValue } from "vendor-sdk";`,
       "src/features/types/index.ts": `export type { VendorType } from "vendor-types";`,
-    });
+    }, capabilities({ "vendor-sdk": "external-system" }));
 
     assert.ok(manifest.diagnostics.some((entry) => entry.rule === "feature-boundary" && entry.file.includes("features/named")));
     assert.ok(manifest.diagnostics.some((entry) => entry.rule === "feature-boundary" && entry.file.includes("features/star")));
     assert.ok(manifest.diagnostics.some((entry) => entry.rule === "runtime-boundary" && entry.file.includes("view.client")));
-    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "external-io" && entry.target === "vendor-sdk"));
-    assert.ok(!manifest.diagnostics.some((entry) => entry.rule === "external-io" && entry.target === "vendor-types"));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "package-capability" && entry.target === "vendor-sdk"));
+    assert.ok(!manifest.diagnostics.some((entry) => entry.rule === "package-capability" && entry.target === "vendor-types"));
     assert.deepEqual(manifest.dependencies.map(({ from, to, symbols }) => ({ from, to, symbols })), [
       { from: "named", to: "billing", symbols: ["invoice", "refund"] },
       { from: "star", to: "billing", symbols: ["*"] },
@@ -138,7 +156,7 @@ export const email = implementAdapter(Email, { send: () => true });
     assert.ok(manifest.diagnostics.some((entry) => entry.rule === "runtime-boundary" && entry.target === "@/features/billing"));
     assert.ok(manifest.diagnostics.some((entry) => entry.rule === "runtime-boundary" && entry.file.endsWith("namespace.client.ts")));
     assert.ok(rules(manifest).includes("domain-ui"));
-    assert.ok(rules(manifest).includes("external-io"));
+    assert.ok(rules(manifest).includes("package-capability"));
   });
 
   it("restricts privileged Node IO while allowing pure and type-only imports", async () => {
@@ -152,7 +170,7 @@ export { path, fs, childProcess };
 export type { PathLike };
 `,
     });
-    const targets = manifest.diagnostics.filter((entry) => entry.rule === "external-io").map((entry) => entry.target);
+    const targets = manifest.diagnostics.filter((entry) => entry.rule === "package-capability").map((entry) => entry.target);
     assert.deepEqual(targets, ["node:fs", "node:child_process"]);
     assert.ok(!targets.includes("node:path"));
   });
@@ -230,32 +248,38 @@ export { loose, sure, cast, later, old, Decorated };
       "src/features/account/index.ts": emptyBoundary,
       "src/features/account/suppressed.ts": `
 import { architecture } from "typescript-on-rails";
-architecture.allow({ rule: "external-io", reason: "Required vendor boundary during migration", target: "vendor-ok" });
+architecture.allow({ rule: "package-capability", reason: "Required vendor boundary during migration", target: "vendor-ok" });
 import ok from "vendor-ok";
 import bad from "vendor-bad";
 export { ok, bad };
 `,
       "src/features/account/expired.ts": `
 import { architecture } from "typescript-on-rails";
-architecture.allow({ rule: "external-io", reason: "Old migration", expires: "2000-01-01" });
+architecture.allow({ rule: "package-capability", reason: "Old migration", expires: "2000-01-01" });
 import old from "vendor-old";
 export { old };
 `,
       "src/features/account/bad-reason.ts": `
 import { architecture } from "typescript-on-rails";
-architecture.allow({ rule: "external-io", reason: "   " });
+architecture.allow({ rule: "package-capability", reason: "   " });
 import nope from "vendor-nope";
 export { nope };
 `,
       "src/features/account/impossible-date.ts": `
 import { architecture } from "typescript-on-rails";
-architecture.allow({ rule: "external-io", reason: "Impossible date", expires: "2099-02-30" });
+architecture.allow({ rule: "package-capability", reason: "Impossible date", expires: "2099-02-30" });
 import future from "vendor-future";
 export { future };
 `,
-    });
+    }, capabilities({
+      "vendor-ok": "external-system",
+      "vendor-bad": "external-system",
+      "vendor-old": "external-system",
+      "vendor-nope": "external-system",
+      "vendor-future": "external-system",
+    }));
     const externalTargets = manifest.diagnostics
-      .filter((entry) => entry.rule === "external-io")
+      .filter((entry) => entry.rule === "package-capability")
       .map((entry) => entry.target);
     assert.ok(!externalTargets.includes("vendor-ok"));
     assert.ok(externalTargets.includes("vendor-bad"));
@@ -334,5 +358,258 @@ export const deepLeak: LevelOne = { value: { value: { value: { value: { value: {
     const diagnostic = manifest.diagnostics.find((entry) => entry.rule === "typescript");
     assert.ok(diagnostic);
     assert.match(diagnostic.message, /not assignable to type 'number'/);
+  });
+
+  it("applies pure, UI, external-system, and host-I/O boundaries by current role", async () => {
+    const manifest = await analyze({
+      "src/features/orders/index.ts": emptyBoundary,
+      "src/features/orders/model.ts": `
+import dateLibrary from "date-library";
+import stripeLike from "stripe-like";
+export const values = [dateLibrary, stripeLike];
+`,
+      "src/features/orders/ui/view.ts": `import uiLibrary from "ui-library"; export const view = uiLibrary;`,
+      "src/infra/gateway.ts": `import stripeLike from "stripe-like"; import hostTool from "host-tool"; export { stripeLike, hostTool };`,
+      "src/app.ts": `
+import hostTool from "host-tool";
+import uiLibrary from "ui-library";
+export { hostTool, uiLibrary };
+`,
+    }, capabilities({
+      "date-library": "pure",
+      "ui-library": "ui",
+      "stripe-like": "external-system",
+      "host-tool": "host-io",
+    }));
+
+    const denials = manifest.diagnostics.filter((entry) => entry.rule === "package-capability");
+    assert.deepEqual(denials.map((entry) => entry.target), ["host-tool", "ui-library", "stripe-like"]);
+    assert.match(denials.find((entry) => entry.target === "stripe-like")?.message ?? "", /external-system.*domain.*infrastructure code only/);
+    assert.match(denials.find((entry) => entry.target === "ui-library")?.message ?? "", /ui.*application.*UI\/client code only/);
+    assert.deepEqual(manifest.packagePolicy, [
+      { package: "date-library", capability: "pure" },
+      { package: "host-tool", capability: "host-io" },
+      { package: "stripe-like", capability: "external-system" },
+      { package: "ui-library", capability: "ui" },
+    ]);
+    assert.ok(manifest.packageUses.some((entry) => entry.package === "date-library" && entry.capability === "pure"));
+    assert.ok(manifest.packageUses.some((entry) => entry.package === "stripe-like" && entry.file === "src/infra/gateway.ts"));
+  });
+
+  it("uses exactly one policy source and treats a present empty option as a full replacement", async () => {
+    const files = {
+      "package.json": policyPackageJson({ "date-library": "pure" }),
+      "src/features/dates/index.ts": `import dateLibrary from "date-library"; export { dateLibrary };`,
+    };
+    const filePolicy = await analyze(files);
+    const emptyReplacement = await analyze(files, capabilities({}));
+    const nonemptyReplacement = await analyze(files, capabilities({ "other-library": "pure" }));
+
+    assert.deepEqual(filePolicy.packagePolicy, [{ package: "date-library", capability: "pure" }]);
+    assert.deepEqual(filePolicy.diagnostics.filter((entry) => entry.rule === "package-capability"), []);
+    assert.deepEqual(emptyReplacement.packagePolicy, []);
+    assert.deepEqual(nonemptyReplacement.packagePolicy, [{ package: "other-library", capability: "pure" }]);
+    assert.ok(nonemptyReplacement.diagnostics.some((entry) => (
+      entry.packageCapabilityMigration?.inventory.some((item) => item.package === "date-library") === true
+    )));
+    const migration = emptyReplacement.diagnostics.find((entry) => entry.packageCapabilityMigration !== undefined);
+    assert.deepEqual(migration?.packageCapabilityMigration?.inventory.map((entry) => entry.package), ["date-library"]);
+
+    const malformedFile = await analyze({
+      "package.json": "not json",
+      "src/features/health/index.ts": emptyBoundary,
+    }, capabilities({}));
+    assert.ok(!malformedFile.diagnostics.some((entry) => entry.rule === "package-policy"));
+  });
+
+  it("normalizes scoped roots and gives an exact scoped subpath policy precedence", async () => {
+    const manifest = await analyze({
+      "src/features/ui/index.ts": `
+import root from "@scope/library";
+import browser from "@scope/library/browser";
+import server from "@scope/library/server";
+export { root, browser, server };
+`,
+    }, capabilities({
+      "@scope/library": "pure",
+      "@scope/library/server": "external-system",
+    }));
+
+    assert.deepEqual(manifest.packageUses.map(({ package: packageName, capability }) => ({ package: packageName, capability })), [
+      { package: "@scope/library", capability: "pure" },
+      { package: "@scope/library/browser", capability: "pure" },
+      { package: "@scope/library/server", capability: "external-system" },
+    ]);
+    assert.ok(manifest.diagnostics.some((entry) => entry.target === "@scope/library/server"));
+    assert.ok(!manifest.diagnostics.some((entry) => entry.rule === "package-policy"));
+  });
+
+  it("checks all supported static value import and export forms but excludes type-only forms", async () => {
+    const manifest = await analyze({
+      "src/features/forms/index.ts": `
+import defaultValue from "default-package";
+import * as namespaceValue from "namespace-package";
+import defaultWithType, { type DefaultCompanion } from "default-companion-package";
+import { type MixedType, mixedValue } from "mixed-package";
+import "side-effect-package";
+import type TypeDefault from "type-default-package";
+export { namedValue } from "named-export-package";
+export * from "star-export-package";
+export * as exportedNamespace from "namespace-export-package";
+export type { TypeOnly } from "type-export-package";
+export { type TypeOnly as AnotherType } from "type-export-package";
+export { defaultValue, defaultWithType, namespaceValue, mixedValue };
+export type { DefaultCompanion, MixedType, TypeDefault };
+`,
+    }, capabilities({
+      "default-package": "pure",
+      "default-companion-package": "pure",
+      "namespace-package": "pure",
+      "mixed-package": "pure",
+      "side-effect-package": "pure",
+      "named-export-package": "pure",
+      "star-export-package": "pure",
+      "namespace-export-package": "pure",
+    }));
+
+    assert.deepEqual(manifest.packageUses.map((entry) => entry.package), [
+      "default-companion-package",
+      "default-package",
+      "mixed-package",
+      "named-export-package",
+      "namespace-export-package",
+      "namespace-package",
+      "side-effect-package",
+      "star-export-package",
+    ]);
+    assert.ok(!manifest.packageUses.some((entry) => entry.package.includes("type-")));
+    assert.ok(!manifest.diagnostics.some((entry) => entry.packageCapabilityMigration !== undefined));
+  });
+
+  it("canonicalizes Node identities and keeps framework-owned capabilities authoritative", async () => {
+    const manifest = await analyze({
+      "src/features/node/index.ts": `
+import fsBare from "fs";
+import fsNode from "node:fs";
+import pathBare from "path";
+import pathNode from "node:path";
+export { fsBare, fsNode, pathBare, pathNode };
+`,
+    }, capabilities({
+      fs: "pure",
+      path: "pure",
+      "node:path": "pure",
+    }));
+
+    assert.deepEqual(manifest.packagePolicy, [{ package: "node:path", capability: "pure" }]);
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "package-policy" && /framework-owned node:fs/.test(entry.message)));
+    assert.deepEqual(manifest.packageUses.map(({ package: packageName, capability }) => ({ package: packageName, capability })), [
+      { package: "node:fs", capability: "host-io" },
+      { package: "node:fs", capability: "host-io" },
+      { package: "node:path", capability: "pure" },
+      { package: "node:path", capability: "pure" },
+    ]);
+    assert.equal(manifest.diagnostics.filter((entry) => entry.rule === "package-capability" && entry.target === "node:fs").length, 2);
+    assert.ok(!manifest.diagnostics.some((entry) => entry.rule === "package-capability" && entry.target === "node:path"));
+  });
+
+  it("retains external package evidence at a local barrel origin", async () => {
+    const manifest = await analyze({
+      "src/shared/vendor.ts": `export { externalValue } from "external-package/subpath";`,
+      "src/features/barrel/index.ts": `export { externalValue } from "../../shared/vendor.js";`,
+    }, capabilities({ "external-package": "pure" }));
+
+    assert.deepEqual(manifest.packageUses, [{
+      package: "external-package/subpath",
+      capability: "pure",
+      file: "src/shared/vendor.ts",
+      line: 1,
+    }]);
+  });
+
+  it("reports distinct source and validation failures without granting invalid entries", async () => {
+    const missingFixture = await createAppFixture({ "src/features/health/index.ts": emptyBoundary }, { packageJson: "missing" });
+    fixtures.push(missingFixture);
+    const missingPackage = analyzeApplication(missingFixture.root);
+    const malformedJson = await analyze({ "package.json": "{", "src/features/health/index.ts": emptyBoundary });
+    const missingPolicy = await analyze({ "package.json": `{ "private": true }`, "src/features/health/index.ts": emptyBoundary });
+    const malformedPolicy = await analyze({
+      "package.json": JSON.stringify({ typescriptOnRails: { packageCapabilities: [] } }),
+      "src/features/health/index.ts": emptyBoundary,
+    });
+    const invalidEntries = await analyze({
+      "package.json": policyPackageJson({
+        "bad key": "pure",
+        "root-package": "pure",
+        "root-package/blocked": "maybe",
+        vendor: "maybe",
+        fs: "host-io",
+        "node:fs": "pure",
+      }),
+      "src/features/vendor/index.ts": `
+import fs from "node:fs";
+import blocked from "root-package/blocked";
+import hidden from "#external-package";
+import unknown from "unknown-package";
+import vendor from "vendor";
+export { fs, blocked, hidden, unknown, vendor };
+`,
+    });
+
+    assert.match(missingPackage.diagnostics.find((entry) => entry.rule === "package-policy")?.message ?? "", /package.json was not found/);
+    assert.match(malformedJson.diagnostics.find((entry) => entry.rule === "package-policy")?.message ?? "", /not valid JSON/);
+    assert.match(missingPolicy.diagnostics.find((entry) => entry.rule === "package-policy")?.message ?? "", /policy is missing/);
+    assert.match(malformedPolicy.diagnostics.find((entry) => entry.rule === "package-policy")?.message ?? "", /packageCapabilities must be an object/);
+    assert.ok(invalidEntries.diagnostics.some((entry) => entry.rule === "package-policy" && /Invalid package capability key/.test(entry.message)));
+    assert.ok(invalidEntries.diagnostics.some((entry) => entry.rule === "package-policy" && /Invalid capability/.test(entry.message)));
+    assert.ok(invalidEntries.diagnostics.some((entry) => entry.rule === "package-policy" && /Conflicting package capability keys/.test(entry.message)));
+    assert.ok(invalidEntries.diagnostics.some((entry) => (
+      entry.rule === "package-capability"
+      && entry.target === "#external-package"
+      && /cannot be mapped to an exact package capability key/.test(entry.message)
+    )));
+    assert.ok(invalidEntries.diagnostics.some((entry) => entry.packageCapabilityMigration?.inventory.some((item) => item.package === "unknown-package") === true));
+    assert.ok(!invalidEntries.packageUses.some((entry) => entry.package === "vendor"));
+    assert.ok(!invalidEntries.packageUses.some((entry) => entry.package === "root-package/blocked"));
+    assert.ok(invalidEntries.packageUses.some((entry) => (
+      entry.package === "node:fs" && entry.capability === "host-io"
+    )));
+  });
+
+  it("guides callers away from the removed option and emits a deterministic non-writing starter map", async () => {
+    const fixture = await createAppFixture({
+      "src/features/unknown/index.ts": `
+import { architecture } from "typescript-on-rails";
+architecture.allow({ rule: "package-capability", reason: "An unknown effect cannot be waived" });
+import second from "zeta/subpath";
+import first from "alpha";
+import again from "zeta/other";
+export { second, first, again };
+`,
+    });
+    fixtures.push(fixture);
+    const packageFile = path.join(fixture.root, "package.json");
+    const before = await readFile(packageFile, "utf8");
+    const legacyOptions: AnalyzeApplicationOptions & { readonly allowedExternalPackages: readonly string[] } = {
+      packageCapabilities: {},
+      allowedExternalPackages: ["alpha"],
+    };
+    const manifest = analyzeApplication(fixture.root, legacyOptions);
+    const after = await readFile(packageFile, "utf8");
+
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "package-policy" && /allowedExternalPackages was removed/.test(entry.message)));
+    const migration = manifest.diagnostics.find((entry) => entry.packageCapabilityMigration !== undefined)?.packageCapabilityMigration;
+    assert.deepEqual(migration?.inventory, [
+      { package: "alpha", uses: [{ file: "src/features/unknown/index.ts", line: 5 }] },
+      { package: "zeta", uses: [
+        { file: "src/features/unknown/index.ts", line: 4 },
+        { file: "src/features/unknown/index.ts", line: 6 },
+      ] },
+    ]);
+    assert.deepEqual(migration?.packageCapabilities, {
+      alpha: "CHOOSE: pure | ui | external-system | host-io",
+      zeta: "CHOOSE: pure | ui | external-system | host-io",
+    });
+    assert.equal(before, after);
   });
 });

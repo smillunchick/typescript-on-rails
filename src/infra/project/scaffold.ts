@@ -112,6 +112,9 @@ const generatedPackage = {
   private: true,
   version: "0.1.0",
   type: "module",
+  typescriptOnRails: {
+    packageCapabilities: {},
+  },
   scripts: {
     check: "app check",
     typecheck: "tsc -p tsconfig.json",

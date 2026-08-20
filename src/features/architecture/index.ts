@@ -8,7 +8,11 @@ export {
   type SemanticIdOwner,
   type SemanticIdOwnerKind,
 } from "./semantic-id.js";
-export { architecture, type ArchitectureAllowance } from "../runtime/index.js";
+export {
+  architecture,
+  type ArchitectureAllowance,
+  type PackageCapability,
+} from "../runtime/index.js";
 export type {
   AdapterContractManifest,
   AdapterImplementationManifest,
@@ -31,7 +35,7 @@ export type {
   ModelManifest,
   OperationAccess,
   OperationManifest,
-  PackageCapability,
+  PackageCapabilityMigration,
   PackagePolicyManifest,
   PackageUseManifest,
   PublicExportManifest,
@@ -45,4 +49,5 @@ export type {
   TypeContractPrimitive,
   TypeContractProperty,
   TypeContractTupleElement,
+  UnknownPackageInventoryEntry,
 } from "./manifest.js";

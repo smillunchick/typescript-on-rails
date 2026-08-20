@@ -18,6 +18,8 @@ describe("framework dogfooding", () => {
       "testing",
       "tooling",
     ]);
+    assert.deepEqual(manifest.packagePolicy, [{ package: "typescript", capability: "host-io" }]);
+    assert.ok(manifest.packageUses.some((entry) => entry.package === "typescript" && entry.capability === "host-io"));
     assert.deepEqual(manifest.diagnostics, []);
   });
 
@@ -29,6 +31,8 @@ describe("framework dogfooding", () => {
       "identity",
       "reports",
     ]);
+    assert.deepEqual(manifest.packagePolicy, []);
+    assert.deepEqual(manifest.packageUses, []);
     assert.deepEqual(manifest.diagnostics, []);
     assert.ok(manifest.models.some((model) => model.name === "Invoice" && model.feature === "billing"));
     assert.ok(manifest.operations.some((operation) => operation.name === "approveInvoice"));

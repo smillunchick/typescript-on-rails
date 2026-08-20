@@ -30,6 +30,22 @@ describe("testing helpers", () => {
     }
   });
 
+  it("formats the package capability inventory without changing project policy", async () => {
+    const fixture = await createAppFixture({
+      "src/features/packages/index.ts": `import value from "unknown-package"; export { value };`,
+    });
+    try {
+      const manifest = analyzeApplication(fixture.root);
+      const output = formatArchitectureDiagnostics(manifest);
+      assert.match(output, /Unknown runtime package capabilities/);
+      assert.match(output, /Starter packageCapabilities map/);
+      assert.match(output, /unknown-package/);
+      assert.throws(() => assertArchitecture(manifest), /CHOOSE: pure \| ui \| external-system \| host-io/);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("returns a clean manifest unchanged", async () => {
     const fixture = await createAppFixture({ "src/features/health/index.ts": "export const healthy = true;" });
     try {
