@@ -1,5 +1,6 @@
 import { InvalidInput, type ValidationIssue } from "./errors.js";
-import { object, type ObjectOutput, type SchemaFields, type SchemaMetadata } from "./schema.js";
+import { object, type ObjectOutput, type Schema, type SchemaFields, type SchemaMetadata } from "./schema.js";
+import { normalizeSchema } from "./schema-protocol.js";
 
 export interface Invariant<TValue> {
   readonly name: string;
@@ -31,7 +32,12 @@ export function defineModel<const TFields extends SchemaFields>(definition: {
   readonly fields: TFields;
   readonly invariants?: readonly Invariant<ObjectOutput<TFields>>[];
 }): Model<TFields> {
-  const modelSchema = object(definition.fields);
+  const normalizedFields: Record<string, Schema<unknown>> = {};
+  for (const [name, field] of Object.entries(definition.fields)) {
+    normalizedFields[name] = normalizeSchema(field);
+  }
+  const fields = normalizedFields as TFields;
+  const modelSchema = object(fields);
   const invariants = definition.invariants ?? [];
 
   const validate = (value: unknown): ObjectOutput<TFields> => {
@@ -57,7 +63,7 @@ export function defineModel<const TFields extends SchemaFields>(definition: {
 
   return {
     name: definition.name,
-    fields: definition.fields,
+    fields,
     metadata,
     parse: validate,
     validate,

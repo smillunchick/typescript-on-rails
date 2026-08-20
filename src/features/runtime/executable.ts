@@ -8,6 +8,7 @@ import {
   type SchemaFields,
   type SchemaMetadata,
 } from "./schema.js";
+import { isSchema, normalizeSchema } from "./schema-protocol.js";
 
 architecture.allow({
   rule: "boring-typescript",
@@ -64,14 +65,10 @@ export interface Executable<TInput, TResult, TContext extends ExecutionContext> 
   execute(input: unknown, context: TContext): Promise<TResult>;
 }
 
-function isSchema(value: InputDefinition): value is Schema<unknown> {
-  return "parse" in value && typeof value.parse === "function" && "metadata" in value;
-}
-
 function normalizeInput<TInputDefinition extends InputDefinition>(
   input: TInputDefinition,
 ): Schema<InputFrom<TInputDefinition>> {
-  if (isSchema(input)) return input as Schema<InputFrom<TInputDefinition>>;
+  if (isSchema(input)) return normalizeSchema(input) as Schema<InputFrom<TInputDefinition>>;
   return object(input) as Schema<InputFrom<TInputDefinition>>;
 }
 
@@ -94,9 +91,6 @@ async function authorize<TInput, TContext extends ExecutionContext>(
   input: TInput,
   context: TContext,
 ): Promise<void> {
-  if (typeof definition.permission === "string" && !context.permissions.has(definition.permission)) {
-    throw new Forbidden(`Missing permission: ${definition.permission}`);
-  }
   if (typeof definition.authorize === "function" && !(await definition.authorize(input, context))) {
     throw new Forbidden();
   }
@@ -111,19 +105,23 @@ export function createExecutable<
   definition: OperationConfig<TInputDefinition, TResult, TContext>,
 ): Executable<InputFrom<TInputDefinition>, TResult, TContext> {
   const inputSchema = normalizeInput(definition.input);
+  const outputSchema = definition.output === undefined ? undefined : normalizeSchema(definition.output);
   const access = accessMetadata(definition);
-  const metadata: ExecutableMetadata = definition.output === undefined
+  const metadata: ExecutableMetadata = outputSchema === undefined
     ? { kind, input: inputSchema.metadata, access }
-    : { kind, input: inputSchema.metadata, output: definition.output.metadata, access };
+    : { kind, input: inputSchema.metadata, output: outputSchema.metadata, access };
 
   return {
     metadata,
     async execute(input, context) {
       try {
+        if (typeof definition.permission === "string" && !context.permissions.has(definition.permission)) {
+          throw new Forbidden(`Missing permission: ${definition.permission}`);
+        }
         const parsedInput = inputSchema.parse(input);
         await authorize(definition, parsedInput, context);
         const result = await definition.run(parsedInput, context);
-        return definition.output === undefined ? result : definition.output.parse(result);
+        return outputSchema === undefined ? result : outputSchema.parse(result);
       } catch (error) {
         throw normalizeError(error);
       }

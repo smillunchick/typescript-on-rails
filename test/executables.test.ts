@@ -7,6 +7,7 @@ import {
   InvalidInput,
   Unexpected,
   action,
+  adaptSchema,
   number,
   object,
   query,
@@ -158,6 +159,87 @@ describe("actions, queries, and routes", () => {
 
     assert.equal(await health.execute(undefined, anonymous), "ok");
     assert.equal(health.metadata.input, undefined);
+  });
+
+  it("uses adapted schemas for actions, queries, and routes", async () => {
+    const input = adaptSchema({
+      metadata: { kind: "object", fields: { value: { kind: "number" } } } as const,
+      parse: (value: unknown) => {
+        const candidate = value as { value?: unknown };
+        return typeof candidate?.value === "number"
+          ? { success: true as const, value: { value: candidate.value } }
+          : { success: false as const, error: candidate?.value };
+      },
+      mapError: () => [{ path: ["value"], code: "invalid_type", expected: "number", received: "string" }],
+    });
+    const adaptedAction = action({ input, public: true, run: ({ value }) => value + 1 });
+    const adaptedQuery = query({ input, public: true, run: ({ value }) => value + 2 });
+    const adaptedRoute = route({ method: "POST", path: "/adapted", input, public: true, handler: ({ value }) => value + 3 });
+
+    assert.equal(await adaptedAction.execute({ value: 1 }, anonymous), 2);
+    assert.equal(await adaptedQuery.execute({ value: 1 }, anonymous), 3);
+    assert.equal(await adaptedRoute.execute({ value: 1 }, anonymous), 4);
+    await assert.rejects(() => adaptedAction.execute({ value: "secret" }, anonymous), InvalidInput);
+    assert.deepEqual(adaptedRoute.metadata.input, input.metadata);
+  });
+
+  it("checks permissions before parsing and parses once for contextual authorization", async () => {
+    let permissionParses = 0;
+    const permissionInput = adaptSchema({
+      metadata: { kind: "string" } as const,
+      parse: (value: unknown) => {
+        permissionParses += 1;
+        return { success: true as const, value: String(value) };
+      },
+      mapError: () => [{ code: "invalid_value" }],
+    });
+    const protectedAction = action({ input: permissionInput, permission: "thing.read", run: (value) => value });
+    const protectedRoute = route({ method: "GET", path: "/thing", input: permissionInput, permission: "thing.read", handler: (value) => value });
+
+    await assert.rejects(() => protectedAction.execute("secret", anonymous), Forbidden);
+    await assert.rejects(() => protectedRoute.execute("secret", anonymous), Forbidden);
+    assert.equal(permissionParses, 0);
+    const permitted = { permissions: new Set(["thing.read"]) };
+    assert.equal(await protectedAction.execute("action", permitted), "action");
+    assert.equal(await protectedRoute.execute("route", permitted), "route");
+    assert.equal(permissionParses, 2);
+
+    let contextualParses = 0;
+    const contextualInput = adaptSchema({
+      metadata: { kind: "string" } as const,
+      parse: (value: unknown) => {
+        contextualParses += 1;
+        return { success: true as const, value: String(value) };
+      },
+      mapError: () => [{ code: "invalid_value" }],
+    });
+    const contextual = action({
+      input: contextualInput,
+      authorize: (value) => value === "allowed",
+      run: (value) => value,
+    });
+    await assert.rejects(() => contextual.execute("denied", anonymous), Forbidden);
+    assert.equal(await contextual.execute("allowed", anonymous), "allowed");
+    assert.equal(contextualParses, 2);
+  });
+
+  it("rejects parser thenables before operation and route code receives input", async () => {
+    const asynchronous = adaptSchema({
+      metadata: { kind: "string" } as const,
+      parse: (() => Promise.resolve({ success: true as const, value: "late" })) as unknown as () => { readonly success: true; readonly value: string },
+      mapError: () => [{ code: "invalid_value" }],
+    });
+    let actionCalls = 0;
+    let queryCalls = 0;
+    let routeCalls = 0;
+    const adaptedAction = action({ input: asynchronous, public: true, run: () => { actionCalls += 1; return true; } });
+    const adaptedQuery = query({ input: asynchronous, public: true, run: () => { queryCalls += 1; return true; } });
+    const adaptedRoute = route({ method: "POST", path: "/async", input: asynchronous, public: true, handler: () => { routeCalls += 1; return true; } });
+
+    await assert.rejects(() => adaptedAction.execute("value", anonymous), Unexpected);
+    await assert.rejects(() => adaptedQuery.execute("value", anonymous), Unexpected);
+    await assert.rejects(() => adaptedRoute.execute("value", anonymous), Unexpected);
+    assert.deepEqual([actionCalls, queryCalls, routeCalls], [0, 0, 0]);
   });
 
   it("rejects operation and route definitions with zero or multiple access decisions", () => {

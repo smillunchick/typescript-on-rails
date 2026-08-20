@@ -1,30 +1,37 @@
 import { architecture } from "./architecture.js";
 import { InvalidInput, type ValidationIssue, type ValidationPathSegment } from "./errors.js";
+import {
+  createSchema,
+  normalizeSchema,
+  type LiteralValue,
+  type Schema,
+  type SchemaMetadata,
+} from "./schema-protocol.js";
+
+export {
+  CANONICAL_SCHEMA_VERSION,
+  SCHEMA_PROTOCOL_MARKER,
+  SCHEMA_PROTOCOL_VERSION,
+  adaptSchema,
+} from "./schema-protocol.js";
+export type {
+  CanonicalJsonValue,
+  LiteralValue,
+  NormalizedSchema,
+  Schema,
+  SchemaAdapterIssue,
+  SchemaAdapterIssueCode,
+  SchemaMetadata,
+  SchemaParserResult,
+  SchemaProtocolDescriptor,
+  SchemaProtocolFailure,
+  SchemaProvenance,
+} from "./schema-protocol.js";
 
 architecture.allow({
   rule: "boring-typescript",
   reason: "Runtime validation proves the dynamically assembled object matches its inferred field map.",
 });
-
-export type LiteralValue = string | number | boolean | null;
-
-export type SchemaMetadata =
-  | { readonly kind: "string" }
-  | { readonly kind: "number" }
-  | { readonly kind: "boolean" }
-  | { readonly kind: "date" }
-  | { readonly kind: "id"; readonly entity?: string }
-  | { readonly kind: "money"; readonly currency: "minor-unit" }
-  | { readonly kind: "enum"; readonly values: readonly LiteralValue[] }
-  | { readonly kind: "literal"; readonly value: LiteralValue }
-  | { readonly kind: "optional"; readonly inner: SchemaMetadata }
-  | { readonly kind: "array"; readonly items: SchemaMetadata }
-  | { readonly kind: "object"; readonly fields: Readonly<Record<string, SchemaMetadata>> };
-
-export interface Schema<T> {
-  readonly metadata: SchemaMetadata;
-  parse(value: unknown, path?: readonly ValidationPathSegment[]): T;
-}
 
 export type Infer<TSchema extends Schema<unknown>> = TSchema extends Schema<infer TOutput>
   ? TOutput
@@ -33,6 +40,12 @@ export type Infer<TSchema extends Schema<unknown>> = TSchema extends Schema<infe
 export type SchemaFields = Readonly<Record<string, Schema<unknown>>>;
 export type ObjectOutput<TFields extends SchemaFields> = {
   readonly [TKey in keyof TFields]: Infer<TFields[TKey]>;
+};
+export type SchemaMetadataOf<TSchema extends Schema<unknown>> =
+  TSchema extends Schema<unknown, infer TMetadata> ? TMetadata : never;
+export type ObjectSchemaMetadata<TFields extends SchemaFields> = {
+  readonly kind: "object";
+  readonly fields: { readonly [TKey in keyof TFields]: SchemaMetadataOf<TFields[TKey]> };
 };
 
 function receivedType(value: unknown): string {
@@ -46,6 +59,15 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function setOwn<TValue>(target: Record<string, TValue>, key: string, value: TValue): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
 function issue(
   path: readonly ValidationPathSegment[],
   message: string,
@@ -55,27 +77,15 @@ function issue(
   return new InvalidInput(message, [{ path, message, expected, received: receivedType(value) }]);
 }
 
-function schema<T>(
-  metadata: SchemaMetadata,
-  parser: (value: unknown, path: readonly ValidationPathSegment[]) => T,
-): Schema<T> {
-  return {
-    metadata,
-    parse(value, path = []) {
-      return parser(value, path);
-    },
-  };
-}
-
-export function string(): Schema<string> {
-  return schema({ kind: "string" }, (value, path) => {
+export function string(): Schema<string, { readonly kind: "string" }> {
+  return createSchema({ kind: "string" }, (value, path) => {
     if (typeof value !== "string") throw issue(path, "Expected a string", "string", value);
     return value;
   });
 }
 
-export function number(): Schema<number> {
-  return schema({ kind: "number" }, (value, path) => {
+export function number(): Schema<number, { readonly kind: "number" }> {
+  return createSchema({ kind: "number" }, (value, path) => {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw issue(path, "Expected a finite number", "finite number", value);
     }
@@ -83,15 +93,15 @@ export function number(): Schema<number> {
   });
 }
 
-export function boolean(): Schema<boolean> {
-  return schema({ kind: "boolean" }, (value, path) => {
+export function boolean(): Schema<boolean, { readonly kind: "boolean" }> {
+  return createSchema({ kind: "boolean" }, (value, path) => {
     if (typeof value !== "boolean") throw issue(path, "Expected a boolean", "boolean", value);
     return value;
   });
 }
 
-export function date(): Schema<Date> {
-  return schema({ kind: "date" }, (value, path) => {
+export function date(): Schema<Date, { readonly kind: "date" }> {
+  return createSchema({ kind: "date" }, (value, path) => {
     if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
       throw issue(path, "Expected a valid Date", "Date", value);
     }
@@ -99,12 +109,14 @@ export function date(): Schema<Date> {
   });
 }
 
-export function id(entityName?: string): Schema<string> {
-  const metadata: SchemaMetadata = entityName === undefined
-    ? { kind: "id" }
-    : { kind: "id", entity: entityName };
+export function id(): Schema<string, { readonly kind: "id" }>;
+export function id<const TEntity extends string>(entityName: TEntity): Schema<string, { readonly kind: "id"; readonly entity: TEntity }>;
+export function id(entityName?: string): Schema<string, { readonly kind: "id"; readonly entity?: string }> {
+  const metadata = entityName === undefined
+    ? { kind: "id" } as const
+    : { kind: "id", entity: entityName } as const;
 
-  return schema(metadata, (value, path) => {
+  return createSchema(metadata, (value, path) => {
     if (typeof value !== "string" || value.trim().length === 0) {
       throw issue(path, "Expected a non-empty identifier", "non-empty string", value);
     }
@@ -112,8 +124,8 @@ export function id(entityName?: string): Schema<string> {
   });
 }
 
-export function money(): Schema<number> {
-  return schema({ kind: "money", currency: "minor-unit" }, (value, path) => {
+export function money(): Schema<number, { readonly kind: "money"; readonly currency: "minor-unit" }> {
+  return createSchema({ kind: "money", currency: "minor-unit" }, (value, path) => {
     if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
       throw issue(path, "Expected a non-negative integer money amount", "minor-unit integer", value);
     }
@@ -130,8 +142,8 @@ function isEnumValue<const TValues extends readonly LiteralValue[]>(
 
 export function enumOf<const TValues extends readonly [LiteralValue, ...LiteralValue[]]>(
   ...values: TValues
-): Schema<TValues[number]> {
-  return schema({ kind: "enum", values }, (value, path) => {
+): Schema<TValues[number], { readonly kind: "enum"; readonly values: TValues }> {
+  return createSchema({ kind: "enum", values }, (value, path) => {
     if (!isEnumValue(values, value)) {
       throw issue(path, `Expected one of: ${values.join(", ")}`, "enum value", value);
     }
@@ -139,8 +151,10 @@ export function enumOf<const TValues extends readonly [LiteralValue, ...LiteralV
   });
 }
 
-export function literal<const TValue extends LiteralValue>(value: TValue): Schema<TValue> {
-  return schema({ kind: "literal", value }, (input, path) => {
+export function literal<const TValue extends LiteralValue>(
+  value: TValue,
+): Schema<TValue, { readonly kind: "literal"; readonly value: TValue }> {
+  return createSchema({ kind: "literal", value }, (input, path) => {
     if (!Object.is(input, value)) {
       throw issue(path, `Expected literal ${String(value)}`, JSON.stringify(value), input);
     }
@@ -148,22 +162,28 @@ export function literal<const TValue extends LiteralValue>(value: TValue): Schem
   });
 }
 
-export function optional<TValue>(inner: Schema<TValue>): Schema<TValue | undefined> {
-  return schema({ kind: "optional", inner: inner.metadata }, (value, path) => {
+export function optional<TValue, const TMetadata extends SchemaMetadata>(
+  inner: Schema<TValue, TMetadata>,
+): Schema<TValue | undefined, { readonly kind: "optional"; readonly inner: TMetadata }> {
+  const normalizedInner = normalizeSchema(inner);
+  return createSchema({ kind: "optional", inner: normalizedInner.metadata }, (value, path) => {
     if (value === undefined) return undefined;
-    return inner.parse(value, path);
+    return normalizedInner.parse(value, path);
   });
 }
 
-export function array<TValue>(items: Schema<TValue>): Schema<readonly TValue[]> {
-  return schema({ kind: "array", items: items.metadata }, (value, path) => {
+export function array<TValue, const TMetadata extends SchemaMetadata>(
+  items: Schema<TValue, TMetadata>,
+): Schema<readonly TValue[], { readonly kind: "array"; readonly items: TMetadata }> {
+  const normalizedItems = normalizeSchema(items);
+  return createSchema({ kind: "array", items: normalizedItems.metadata }, (value, path) => {
     if (!Array.isArray(value)) throw issue(path, "Expected an array", "array", value);
 
     const output: TValue[] = [];
     const issues: ValidationIssue[] = [];
     for (const [index, item] of value.entries()) {
       try {
-        output.push(items.parse(item, [...path, index]));
+        output.push(normalizedItems.parse(item, [...path, index]));
       } catch (error) {
         if (error instanceof InvalidInput) issues.push(...error.issues);
         else throw error;
@@ -174,27 +194,34 @@ export function array<TValue>(items: Schema<TValue>): Schema<readonly TValue[]> 
   });
 }
 
-export function object<const TFields extends SchemaFields>(fields: TFields): Schema<ObjectOutput<TFields>> {
+export function object<const TFields extends SchemaFields>(
+  fields: TFields,
+): Schema<ObjectOutput<TFields>, ObjectSchemaMetadata<TFields>> {
+  const normalizedFields: Record<string, Schema<unknown>> = {};
   const fieldMetadata: Record<string, SchemaMetadata> = {};
-  for (const [name, field] of Object.entries(fields)) fieldMetadata[name] = field.metadata;
+  for (const [name, field] of Object.entries(fields)) {
+    const normalized = normalizeSchema(field);
+    setOwn(normalizedFields, name, normalized);
+    setOwn(fieldMetadata, name, normalized.metadata);
+  }
 
-  return schema({ kind: "object", fields: fieldMetadata }, (value, path) => {
-    if (!isRecord(value)) {
-      throw issue(path, "Expected an object", "object", value);
-    }
+  return createSchema(
+    { kind: "object", fields: fieldMetadata } as ObjectSchemaMetadata<TFields>,
+    (value, path) => {
+      if (!isRecord(value)) throw issue(path, "Expected an object", "object", value);
 
-    const input = value;
-    const output: Record<string, unknown> = {};
-    const issues: ValidationIssue[] = [];
-    for (const [name, field] of Object.entries(fields)) {
-      try {
-        output[name] = field.parse(input[name], [...path, name]);
-      } catch (error) {
-        if (error instanceof InvalidInput) issues.push(...error.issues);
-        else throw error;
+      const output: Record<string, unknown> = {};
+      const issues: ValidationIssue[] = [];
+      for (const [name, field] of Object.entries(normalizedFields)) {
+        try {
+          setOwn(output, name, field.parse(value[name], [...path, name]));
+        } catch (error) {
+          if (error instanceof InvalidInput) issues.push(...error.issues);
+          else throw error;
+        }
       }
-    }
-    if (issues.length > 0) throw new InvalidInput("Invalid object", issues);
-    return output as ObjectOutput<TFields>;
-  });
+      if (issues.length > 0) throw new InvalidInput("Invalid object", issues);
+      return output as ObjectOutput<TFields>;
+    },
+  );
 }

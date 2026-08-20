@@ -1,5 +1,6 @@
 import { architecture } from "./architecture.js";
 import type { Infer, Schema, SchemaMetadata } from "./schema.js";
+import { normalizeSchema } from "./schema-protocol.js";
 
 architecture.allow({
   rule: "boring-typescript",
@@ -45,13 +46,17 @@ export function defineAdapterContract<const TOperations extends AdapterOperation
   readonly name: string;
   readonly operations: TOperations;
 }): AdapterContract<TOperations> {
+  const normalizedOperations: Record<string, AdapterOperationDefinition<Schema<unknown>, Schema<unknown>>> = {};
   const operations: Record<string, { input: SchemaMetadata; output: SchemaMetadata }> = {};
   for (const [name, operation] of Object.entries(definition.operations)) {
-    operations[name] = { input: operation.input.metadata, output: operation.output.metadata };
+    const input = normalizeSchema(operation.input);
+    const output = normalizeSchema(operation.output);
+    normalizedOperations[name] = { input, output };
+    operations[name] = { input: input.metadata, output: output.metadata };
   }
   return {
     name: definition.name,
-    operations: definition.operations,
+    operations: normalizedOperations as TOperations,
     metadata: { kind: "adapter-contract", name: definition.name, operations },
   };
 }

@@ -1,6 +1,7 @@
 import { architecture } from "./architecture.js";
 import { Forbidden, InvalidInput, normalizeError } from "./errors.js";
 import { object, type Infer, type ObjectOutput, type Schema, type SchemaFields, type SchemaMetadata } from "./schema.js";
+import { isSchema, normalizeSchema } from "./schema-protocol.js";
 import type { ExecutionContext } from "./executable.js";
 
 architecture.allow({
@@ -37,10 +38,6 @@ export interface RouteDefinition<TInput, TResult, TContext extends ExecutionCont
   execute(input: unknown, context: TContext): Promise<TResult>;
 }
 
-function isSchema(value: Schema<unknown> | SchemaFields): value is Schema<unknown> {
-  return "parse" in value && typeof value.parse === "function";
-}
-
 export function route<
   TInputDefinition extends RouteInputDefinition = undefined,
   TResult = unknown,
@@ -55,8 +52,9 @@ export function route<
   const inputSchema: Schema<unknown> | undefined = definition.input === undefined
     ? undefined
     : isSchema(definition.input)
-      ? definition.input
+      ? normalizeSchema(definition.input)
       : object(definition.input);
+  const outputSchema = definition.output === undefined ? undefined : normalizeSchema(definition.output);
   const hasPermission = typeof definition.permission === "string";
   const hasAuthorize = typeof definition.authorize === "function";
   const isPublic = definition.public === true;
@@ -70,7 +68,7 @@ export function route<
     method: definition.method,
     path: definition.path,
     ...(inputSchema === undefined ? {} : { input: inputSchema.metadata }),
-    ...(definition.output === undefined ? {} : { output: definition.output.metadata }),
+    ...(outputSchema === undefined ? {} : { output: outputSchema.metadata }),
     access,
     ...(hasPermission ? { permission: definition.permission } : {}),
   };
@@ -79,16 +77,16 @@ export function route<
     metadata,
     async execute(input, context) {
       try {
-        // This assertion restores the generic relation after runtime schema dispatch.
-        const parsedInput = (inputSchema === undefined ? undefined : inputSchema.parse(input)) as RouteInput<TInputDefinition>;
         if (hasPermission && !context.permissions.has(definition.permission)) {
           throw new Forbidden(`Missing permission: ${definition.permission}`);
         }
+        // This assertion restores the generic relation after runtime schema dispatch.
+        const parsedInput = (inputSchema === undefined ? undefined : inputSchema.parse(input)) as RouteInput<TInputDefinition>;
         if (hasAuthorize && !(await definition.authorize(parsedInput, context))) {
           throw new Forbidden();
         }
         const result = await definition.handler(parsedInput, context);
-        return definition.output === undefined ? result : definition.output.parse(result);
+        return outputSchema === undefined ? result : outputSchema.parse(result);
       } catch (error) {
         throw normalizeError(error);
       }

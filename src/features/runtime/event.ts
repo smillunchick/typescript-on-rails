@@ -1,4 +1,5 @@
 import type { Schema, SchemaMetadata } from "./schema.js";
+import { normalizeSchema } from "./schema-protocol.js";
 
 type MaybePromise<TValue> = TValue | Promise<TValue>;
 type EventHandler = (payload: unknown) => Promise<void>;
@@ -17,10 +18,11 @@ export function event<TPayload>(definition: {
   readonly name: string;
   readonly payload: Schema<TPayload>;
 }): EventDefinition<TPayload> {
+  const payload = normalizeSchema(definition.payload);
   return {
     name: definition.name,
-    payload: definition.payload,
-    metadata: { kind: "event", name: definition.name, payload: definition.payload.metadata },
+    payload,
+    metadata: { kind: "event", name: definition.name, payload: payload.metadata },
   };
 }
 

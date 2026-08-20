@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 
 import {
   InvalidInput,
+  Unexpected,
+  adaptSchema,
   defineModel,
   enumOf,
   id,
@@ -59,5 +61,40 @@ describe("models and invariants", () => {
       },
       invariants: ["paid invoices must have a positive total"],
     });
+  });
+
+  it("normalizes adapted fields before model validation", () => {
+    const externalId = adaptSchema({
+      metadata: { kind: "id", entity: "External" } as const,
+      parse: (value: unknown) => typeof value === "string"
+        ? { success: true as const, value }
+        : { success: false as const, error: value },
+      mapError: () => [{ code: "invalid_type", expected: "string", received: "number" }],
+    });
+    const External = defineModel({ name: "External", fields: { id: externalId } });
+
+    assert.deepEqual(External.parse({ id: "external_1" }), { id: "external_1" });
+    assert.deepEqual(External.metadata.fields.id, { kind: "id", entity: "External" });
+    assert.throws(() => External.parse({ id: 1 }), InvalidInput);
+  });
+
+  it("rejects a parser thenable before invariants receive model data", () => {
+    let invariantCalls = 0;
+    const asynchronous = adaptSchema({
+      metadata: { kind: "string" } as const,
+      parse: (() => Promise.resolve({ success: true as const, value: "late" })) as unknown as () => { readonly success: true; readonly value: string },
+      mapError: () => [{ code: "invalid_value" }],
+    });
+    const Async = defineModel({
+      name: "Async",
+      fields: { value: asynchronous },
+      invariants: [invariant<{ readonly value: string }>("must not run", () => {
+        invariantCalls += 1;
+        return true;
+      })],
+    });
+
+    assert.throws(() => Async.parse({ value: "input" }), Unexpected);
+    assert.equal(invariantCalls, 0);
   });
 });

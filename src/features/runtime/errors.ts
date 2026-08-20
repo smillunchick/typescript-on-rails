@@ -2,6 +2,7 @@ export type ValidationPathSegment = string | number;
 
 export interface ValidationIssue {
   readonly path: readonly ValidationPathSegment[];
+  readonly code?: string;
   readonly message: string;
   readonly expected?: string;
   readonly received?: string;
