@@ -1,6 +1,12 @@
+import { architecture } from "./architecture.js";
 import { InvalidInput, type ValidationIssue } from "./errors.js";
 import { object, type ObjectOutput, type Schema, type SchemaFields, type SchemaMetadata } from "./schema.js";
 import { normalizeSchema } from "./schema-protocol.js";
+
+architecture.allow({
+  rule: "boring-typescript",
+  reason: "Runtime normalization proves the model field map retains its generic schema types.",
+});
 
 export interface Invariant<TValue> {
   readonly name: string;

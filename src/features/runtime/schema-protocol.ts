@@ -1,3 +1,4 @@
+import { architecture } from "./architecture.js";
 import {
   InvalidInput,
   Unexpected,
@@ -5,6 +6,11 @@ import {
   type ValidationIssue,
   type ValidationPathSegment,
 } from "./errors.js";
+
+architecture.allow({
+  rule: "boring-typescript",
+  reason: "Runtime protocol validation proves unknown metadata, parser results, and adapter issues match their generic types.",
+});
 
 export const SCHEMA_PROTOCOL_MARKER = "typescript-on-rails.schema" as const;
 export const SCHEMA_PROTOCOL_VERSION = "1" as const;

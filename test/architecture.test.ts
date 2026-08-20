@@ -52,7 +52,7 @@ export const email = implementAdapter(Email, { send: () => true });
     const first = await analyze(files);
     const second = await analyze(files);
 
-    assert.equal(first.version, 1);
+    assert.equal(first.version, 2);
     assert.deepEqual(first.features.map((feature) => feature.name), ["billing", "reports"]);
     assert.deepEqual(first.models.map(({ name, feature }) => ({ name, feature })), [{ name: "Invoice", feature: "billing" }]);
     assert.deepEqual(first.operations.map(({ name, kind }) => ({ name, kind })), [
@@ -71,7 +71,8 @@ export const email = implementAdapter(Email, { send: () => true });
     assert.deepEqual(first.dependencies.map(({ from, to }) => ({ from, to })), [{ from: "reports", to: "billing" }]);
     assert.ok(first.features.find((feature) => feature.name === "billing")?.exports.some((entry) => entry.name === "approveInvoice"));
     assert.deepEqual(first.diagnostics, []);
-    assert.deepEqual({ ...first, root: "<root>" }, { ...second, root: "<root>" });
+    assert.deepEqual(first, second);
+    assert.equal("root" in first, false);
   });
 
   it("reports private feature imports with a public-boundary suggestion", async () => {
@@ -175,14 +176,18 @@ export const Paid = event({ payload: object({ id: string() }), name: "Paid" });
 export const Payments = defineAdapterContract({ operations: { charge: { input: object({ id: string() }), output: boolean() } }, name: "Payments" });
 `,
     });
-    assert.deepEqual(first.models.map((entry) => entry.contract), second.models.map((entry) => entry.contract));
-    assert.deepEqual(first.operations.map((entry) => entry.contract), second.operations.map((entry) => entry.contract));
-    assert.deepEqual(first.events.map((entry) => entry.contract), second.events.map((entry) => entry.contract));
-    assert.deepEqual(first.adapters.map((entry) => entry.contract), second.adapters.map((entry) => entry.contract));
-    assert.equal(first.models[0]?.contract, `{fields:{"id":id("Invoice"),"title":string()}}`);
-    assert.equal(first.operations[0]?.contract, `{input:object({"id":string()}),output:boolean(),access:permission:"invoice.approve"}`);
-    assert.equal(first.events[0]?.contract, `{payload:object({"id":string()})}`);
-    assert.equal(first.adapters[0]?.contract, `{operations:{"charge":{"input":object({"id":string()}),"output":boolean()}}}`);
+    assert.deepEqual(first.models.map((entry) => entry.fields), second.models.map((entry) => entry.fields));
+    assert.deepEqual(first.operations.map(({ input, output, access }) => ({ input, output, access })), second.operations.map(({ input, output, access }) => ({ input, output, access })));
+    assert.deepEqual(first.events.map((entry) => entry.payload), second.events.map((entry) => entry.payload));
+    assert.deepEqual(first.adapters, second.adapters);
+    assert.ok([...first.models, ...first.operations, ...first.events, ...first.adapters].every((entry) => !("contract" in entry)));
+    assert.equal(first.models[0]?.fields.status, "resolved");
+    assert.equal(first.operations[0]?.input.runtimeSchema.status, "resolved");
+    assert.equal(first.operations[0]?.output.runtimeSchema.status, "resolved");
+    assert.equal(first.operations[0]?.access, "permission");
+    assert.equal(first.events[0]?.payload.status, "resolved");
+    assert.equal(first.adapters[0]?.kind, "contract");
+    if (first.adapters[0]?.kind === "contract") assert.equal(first.adapters[0].operations.status, "resolved");
   });
 
   it("rejects non-boring TypeScript constructs", async () => {

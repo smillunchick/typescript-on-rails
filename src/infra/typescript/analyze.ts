@@ -2,14 +2,31 @@ import { builtinModules } from "node:module";
 import path from "node:path";
 import ts from "typescript";
 
-import { architecture } from "../../features/runtime/index.js";
-import { extractCallbackTypeContracts, type CallbackTypeContracts } from "./type-contract.js";
+import { encodeSemanticId } from "../../features/architecture/semantic-id.js";
+import {
+  architecture,
+  CANONICAL_SCHEMA_VERSION,
+  SCHEMA_PROTOCOL_VERSION,
+} from "../../features/runtime/index.js";
+import {
+  extractAdapterOperationsFacet,
+  extractRuntimeSchemaFacet,
+  extractSchemaFieldsFacet,
+  extractSchemaOrFieldsFacet,
+} from "./schema-contract.js";
+import {
+  extractCallbackTypeContracts,
+  TYPE_CONTRACT_VERSION,
+  type CallbackTypeContracts,
+  type TypeContractFacet,
+} from "./type-contract.js";
 import type {
   AdapterManifest,
   AnalyzeApplicationOptions,
   ArchitectureDiagnostic,
   ArchitectureExceptionManifest,
   ArchitectureManifest,
+  ContractSlot,
   DependencyManifest,
   EventManifest,
   FeatureManifest,
@@ -17,7 +34,10 @@ import type {
   OperationManifest,
   PublicExportManifest,
   RouteManifest,
+  SemanticIdOwner,
   SourceLocation,
+  StaticTypeFacet,
+  TypeContractDiagnostic,
 } from "../../features/architecture/index.js";
 
 architecture.allow({
@@ -66,7 +86,16 @@ const RULE_CODES: Readonly<Record<string, string>> = {
   "public-api-type": "ARCH010",
   "data-owner": "ARCH011",
   typescript: "ARCH012",
+  "duplicate-semantic-id": "ARCH013",
+  "semantic-identity": "ARCH014",
+  "adapter-link": "ARCH015",
+  "contract-extraction": "ARCH016",
 };
+
+interface PendingAdapterLink {
+  readonly record: AdapterManifest & { readonly kind: "implementation" };
+  readonly expression: ts.Expression | undefined;
+}
 
 interface MutableManifest {
   readonly models: ModelManifest[];
@@ -78,6 +107,8 @@ interface MutableManifest {
   readonly dependencies: DependencyManifest[];
   readonly exceptions: ArchitectureExceptionManifest[];
   readonly diagnostics: ArchitectureDiagnostic[];
+  readonly adapterContracts: Map<ts.Symbol, string>;
+  readonly pendingAdapterLinks: PendingAdapterLink[];
 }
 
 export interface AnalyzedCallbackTypeContract extends CallbackTypeContracts {
@@ -137,7 +168,12 @@ function diagnostic(
   message: string,
   file: string,
   line: number,
-  options: { readonly severity?: "error" | "warning"; readonly suggestion?: string; readonly target?: string } = {},
+  options: {
+    readonly severity?: "error" | "warning";
+    readonly suggestion?: string;
+    readonly target?: string;
+    readonly related?: readonly SourceLocation[];
+  } = {},
 ): ArchitectureDiagnostic {
   return {
     code: RULE_CODES[rule] ?? "ARCH999",
@@ -148,6 +184,7 @@ function diagnostic(
     line,
     ...(options.suggestion === undefined ? {} : { suggestion: options.suggestion }),
     ...(options.target === undefined ? {} : { target: options.target }),
+    ...(options.related === undefined ? {} : { related: options.related }),
   };
 }
 
@@ -155,6 +192,26 @@ function featureNameFor(root: string, fileName: string): string | null {
   const relative = slash(path.relative(path.join(root, "src", "features"), fileName));
   if (relative.startsWith("../") || relative === ".." || path.isAbsolute(relative)) return null;
   return relative.split("/")[0] || null;
+}
+
+function ownerFor(root: string, fileName: string): SemanticIdOwner {
+  const feature = featureNameFor(root, fileName);
+  if (feature !== null) return { kind: "feature", name: feature };
+  return inside(path.join(root, "src", "infra"), fileName)
+    ? { kind: "infra", name: "_" }
+    : { kind: "app", name: "_" };
+}
+
+function semanticId(
+  category: Parameters<typeof encodeSemanticId>[0]["category"],
+  owner: SemanticIdOwner,
+  localName: string,
+): string | null {
+  try {
+    return encodeSemanticId({ category, owner, localName });
+  } catch {
+    return null;
+  }
 }
 
 function inside(root: string, fileName: string): boolean {
@@ -267,99 +324,167 @@ function primitiveForCall(call: ts.CallExpression, bindings: FrameworkBindings):
   return null;
 }
 
-function property(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
-  for (const item of object.properties) {
-    if (!ts.isPropertyAssignment(item)) continue;
-    const itemName = ts.isIdentifier(item.name) || ts.isStringLiteral(item.name) ? item.name.text : undefined;
-    if (itemName === name) return item.initializer;
-  }
+function unwrapTransparentExpression(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current)
+    || ts.isAsExpression(current)
+    || ts.isTypeAssertionExpression(current)
+    || ts.isSatisfiesExpression(current)
+  ) current = current.expression;
+  return current;
+}
+
+function memberName(member: ts.ObjectLiteralElementLike): string | undefined {
+  const name = member.name;
+  return name !== undefined && (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) ? name.text : undefined;
+}
+
+function objectMember(object: ts.ObjectLiteralExpression, name: string): ts.ObjectLiteralElementLike | undefined {
+  return object.properties.find((member) => memberName(member) === name);
+}
+
+function memberExpression(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
+  const member = objectMember(object, name);
+  if (member !== undefined && ts.isPropertyAssignment(member)) return member.initializer;
+  if (member !== undefined && ts.isShorthandPropertyAssignment(member)) return member.name;
   return undefined;
 }
 
-function stringProperty(object: ts.ObjectLiteralExpression, name: string): string | null {
-  const value = property(object, name);
-  return value !== undefined && ts.isStringLiteralLike(value) ? value.text : null;
+function stringMember(checker: ts.TypeChecker, object: ts.ObjectLiteralExpression, name: string): string | null {
+  const value = memberExpression(object, name);
+  if (value === undefined) return null;
+  const type = checker.getTypeAtLocation(value);
+  return type.isStringLiteral() ? type.value : null;
 }
 
-function objectArgument(call: ts.CallExpression): ts.ObjectLiteralExpression | null {
+function declaredName(definition: ts.ObjectLiteralExpression, fallback: string | null): string | null {
+  const member = objectMember(definition, "name");
+  if (member === undefined || !ts.isPropertyAssignment(member)) return fallback;
+  const value = unwrapTransparentExpression(member.initializer);
+  return ts.isStringLiteralLike(value) ? value.text : fallback;
+}
+
+function directObjectArgument(call: ts.CallExpression): ts.ObjectLiteralExpression | null {
   const first = call.arguments[0];
-  return first !== undefined && ts.isObjectLiteralExpression(first) ? first : null;
+  if (first === undefined) return null;
+  const value = unwrapTransparentExpression(first);
+  return ts.isObjectLiteralExpression(value) ? value : null;
+}
+
+function unwrapConstSafeExpression(expression: ts.Expression): ts.Expression | null {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current)
+    || ts.isAsExpression(current)
+    || ts.isTypeAssertionExpression(current)
+    || ts.isSatisfiesExpression(current)
+  ) {
+    if (
+      (ts.isAsExpression(current) || ts.isTypeAssertionExpression(current))
+      && !ts.isConstTypeReference(current.type)
+    ) return null;
+    current = current.expression;
+  }
+  return current;
+}
+
+function constAssertedObjectOrigin(expression: ts.Expression): ts.ObjectLiteralExpression | null {
+  let current = expression;
+  let hasConstAssertion = false;
+  while (
+    ts.isParenthesizedExpression(current)
+    || ts.isAsExpression(current)
+    || ts.isTypeAssertionExpression(current)
+    || ts.isSatisfiesExpression(current)
+  ) {
+    if (ts.isAsExpression(current) || ts.isTypeAssertionExpression(current)) {
+      if (!ts.isConstTypeReference(current.type)) return null;
+      hasConstAssertion = true;
+    }
+    current = current.expression;
+  }
+  return hasConstAssertion && ts.isObjectLiteralExpression(current) ? current : null;
+}
+
+function resolvedConstObjectExpression(
+  checker: ts.TypeChecker,
+  expression: ts.Expression,
+  visited: Set<ts.Symbol>,
+): ts.ObjectLiteralExpression | null {
+  const origin = constAssertedObjectOrigin(expression);
+  if (origin !== null) return origin;
+
+  const current = unwrapConstSafeExpression(expression);
+  if (current === null || (!ts.isIdentifier(current) && !ts.isPropertyAccessExpression(current))) return null;
+  const referenced = checker.getSymbolAtLocation(ts.isPropertyAccessExpression(current) ? current.name : current);
+  if (referenced === undefined) return null;
+  const symbol = resolvedSymbol(checker, referenced);
+  if (visited.has(symbol)) return null;
+  visited.add(symbol);
+  const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
+  if (
+    declaration === undefined
+    || !ts.isVariableDeclaration(declaration)
+    || declaration.initializer === undefined
+    || (declaration.parent.flags & ts.NodeFlags.Const) === 0
+  ) return null;
+  return resolvedConstObjectExpression(checker, declaration.initializer, visited);
+}
+
+function resolvedObjectArgument(checker: ts.TypeChecker, call: ts.CallExpression): ts.ObjectLiteralExpression | null {
+  const first = call.arguments[0];
+  if (first === undefined) return null;
+  return directObjectArgument(call) ?? resolvedConstObjectExpression(checker, first, new Set());
+}
+
+function variableDeclaration(node: ts.Node): ts.VariableDeclaration | null {
+  let current = node;
+  while (
+    ts.isParenthesizedExpression(current.parent)
+    || ts.isAsExpression(current.parent)
+    || ts.isTypeAssertionExpression(current.parent)
+    || ts.isSatisfiesExpression(current.parent)
+  ) current = current.parent;
+  const declaration = current.parent;
+  return ts.isVariableDeclaration(declaration) && declaration.initializer === current ? declaration : null;
 }
 
 function variableName(node: ts.Node): string | null {
-  let current: ts.Node | undefined = node;
-  while (current !== undefined && !ts.isVariableDeclaration(current)) current = current.parent;
-  return current !== undefined && ts.isIdentifier(current.name) ? current.name.text : null;
+  const declaration = variableDeclaration(node);
+  return declaration !== null && ts.isIdentifier(declaration.name) ? declaration.name.text : null;
 }
 
-function canonicalPropertyName(name: ts.PropertyName): string {
-  if (ts.isComputedPropertyName(name)) {
-    return `[${canonicalExpression(name.expression, { named: new Map(), namespaces: new Set() })}]`;
-  }
-  return name.text;
+function staticFacet(facet: TypeContractFacet): StaticTypeFacet {
+  return { ...facet, provenance: "inferred-typescript" };
 }
 
-function canonicalExpression(expression: ts.Expression, bindings: FrameworkBindings): string {
-  if (ts.isStringLiteralLike(expression)) return JSON.stringify(expression.text);
-  if (ts.isNumericLiteral(expression)) return expression.text;
-  if (expression.kind === ts.SyntaxKind.TrueKeyword) return "true";
-  if (expression.kind === ts.SyntaxKind.FalseKeyword) return "false";
-  if (expression.kind === ts.SyntaxKind.NullKeyword) return "null";
-  if (ts.isParenthesizedExpression(expression)) return canonicalExpression(expression.expression, bindings);
-  if (ts.isAsExpression(expression) || ts.isTypeAssertionExpression(expression)) {
-    return canonicalExpression(expression.expression, bindings);
-  }
-  if (ts.isIdentifier(expression)) return `$${expression.text}`;
-  if (ts.isPropertyAccessExpression(expression)) {
-    return `${canonicalExpression(expression.expression, bindings)}.${expression.name.text}`;
-  }
-  if (ts.isPrefixUnaryExpression(expression)) {
-    return `${ts.tokenToString(expression.operator) ?? ""}${canonicalExpression(expression.operand, bindings)}`;
-  }
-  if (ts.isArrayLiteralExpression(expression)) {
-    return `[${expression.elements.map((entry) => canonicalExpression(entry, bindings)).join(",")}]`;
-  }
-  if (ts.isObjectLiteralExpression(expression)) {
-    const entries = expression.properties.map((entry): string => {
-      if (ts.isPropertyAssignment(entry)) {
-        return `${JSON.stringify(canonicalPropertyName(entry.name))}:${canonicalExpression(entry.initializer, bindings)}`;
-      }
-      if (ts.isShorthandPropertyAssignment(entry)) return `${JSON.stringify(entry.name.text)}:$${entry.name.text}`;
-      if (ts.isSpreadAssignment(entry)) return `...${canonicalExpression(entry.expression, bindings)}`;
-      return `${ts.SyntaxKind[entry.kind]}:${entry.name === undefined ? "" : canonicalPropertyName(entry.name)}`;
-    });
-    return `{${entries.sort(compareText).join(",")}}`;
-  }
-  if (ts.isCallExpression(expression)) {
-    const primitive = primitiveForCall(expression, bindings);
-    const callee = primitive === null ? canonicalExpression(expression.expression, bindings) : primitive;
-    return `${callee}(${expression.arguments.map((argument) => canonicalExpression(argument, bindings)).join(",")})`;
-  }
-  if (ts.isNoSubstitutionTemplateLiteral(expression)) return JSON.stringify(expression.text);
-  return `${ts.SyntaxKind[expression.kind]}(${expression.getText().replace(/\s+/g, " ")})`;
+function contractSlot(staticType: TypeContractFacet, runtimeSchema: ContractSlot["runtimeSchema"]): ContractSlot {
+  return { staticType: staticFacet(staticType), runtimeSchema };
 }
 
-function accessSignature(definition: ts.ObjectLiteralExpression, bindings: FrameworkBindings): string {
-  const permission = property(definition, "permission");
-  if (permission !== undefined) return `permission:${canonicalExpression(permission, bindings)}`;
-  if (property(definition, "authorize") !== undefined) return "authorize";
-  const publicAccess = property(definition, "public");
-  if (publicAccess !== undefined) return `public:${canonicalExpression(publicAccess, bindings)}`;
+function missingRequiredSchemaFacet(path: string): ContractSlot["runtimeSchema"] {
+  return {
+    status: "unresolved",
+    validator: "not-declared",
+    diagnostic: { code: "SC004", path, message: "The required runtime schema was not declared" },
+  };
+}
+
+function accessFor(definition: ts.ObjectLiteralExpression): "public" | "permission" | "authorize" | "missing" {
+  if (objectMember(definition, "permission") !== undefined) return "permission";
+  if (objectMember(definition, "authorize") !== undefined) return "authorize";
+  if (objectMember(definition, "public") !== undefined) return "public";
   return "missing";
 }
 
-function contractSignature(
-  definition: ts.ObjectLiteralExpression,
-  bindings: FrameworkBindings,
-  fields: readonly string[],
-  includeAccess = false,
-): string {
-  const entries = fields.map((name) => {
-    const value = property(definition, name);
-    return `${name}:${value === undefined ? "missing" : canonicalExpression(value, bindings)}`;
+function unresolvedCallbackContracts(): CallbackTypeContracts {
+  const facet = (path: "input" | "output"): TypeContractFacet => ({
+    status: "unresolved",
+    labels: [],
+    diagnostic: { code: "TC009", path, message: "The callback must have one resolvable call signature" },
   });
-  if (includeAccess) entries.push(`access:${accessSignature(definition, bindings)}`);
-  return `{${entries.join(",")}}`;
+  return { input: facet("input"), output: facet("output") };
 }
 
 function extractDeclarations(
@@ -371,74 +496,131 @@ function extractDeclarations(
 ): void {
   const bindings = frameworkBindings(sourceFile);
   const feature = featureNameFor(root, sourceFile.fileName);
+  const owner = ownerFor(root, sourceFile.fileName);
+
+  const identity = (
+    category: Parameters<typeof semanticId>[0],
+    name: string,
+    node: ts.Node,
+  ) => ({
+    id: semanticId(category, owner, name),
+    owner,
+    name,
+    feature,
+    ...location(root, sourceFile, node),
+  });
 
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const primitive = primitiveForCall(node, bindings);
       const nameFromVariable = variableName(node);
-      const definition = objectArgument(node);
-      if (primitive === "defineModel" && definition !== null) {
-        const name = stringProperty(definition, "name") ?? nameFromVariable;
-        if (name !== null) output.models.push({
-          name,
-          feature,
-          contract: contractSignature(definition, bindings, ["fields"]),
-          ...location(root, sourceFile, node),
+      const definition = primitive === null ? null : resolvedObjectArgument(checker, node);
+      if (primitive === "defineModel") {
+        const name = definition === null ? (nameFromVariable ?? "") : (declaredName(definition, nameFromVariable) ?? "");
+        const fieldsExpression = definition === null ? undefined : memberExpression(definition, "fields");
+        output.models.push({
+          ...identity("model", name, node),
+          fields: fieldsExpression === undefined
+            ? missingRequiredSchemaFacet("fields")
+            : extractSchemaFieldsFacet(checker, fieldsExpression, "fields"),
         });
-      } else if ((primitive === "action" || primitive === "query") && definition !== null && nameFromVariable !== null) {
-        const permission = stringProperty(definition, "permission");
+      } else if (primitive === "action" || primitive === "query") {
+        const name = nameFromVariable ?? "";
+        const permission = definition === null ? null : stringMember(checker, definition, "permission");
+        const extracted = definition === null
+          ? unresolvedCallbackContracts()
+          : extractCallbackTypeContracts(checker, definition, "run");
+        const inputExpression = definition === null ? undefined : memberExpression(definition, "input");
+        const outputExpression = definition === null ? undefined : memberExpression(definition, "output");
         output.operations.push({
-          name: nameFromVariable,
+          ...identity("operation", name, node),
           kind: primitive,
-          feature,
-          contract: contractSignature(definition, bindings, ["input", "output"], true),
-          ...location(root, sourceFile, node),
+          input: {
+            staticType: staticFacet(extracted.input),
+            runtimeSchema: inputExpression === undefined
+              ? missingRequiredSchemaFacet("input")
+              : extractSchemaOrFieldsFacet(checker, inputExpression, "input"),
+          },
+          output: contractSlot(
+            extracted.output,
+            extractRuntimeSchemaFacet(checker, outputExpression, "output"),
+          ),
+          access: definition === null ? "missing" : accessFor(definition),
           ...(permission === null ? {} : { permission }),
         });
         callbacks.push({
-          name: nameFromVariable,
+          name,
           kind: "operation",
           ...location(root, sourceFile, node),
-          ...extractCallbackTypeContracts(checker, definition, "run"),
+          ...extracted,
         });
         if (permission !== null) output.permissions.add(permission);
-      } else if (primitive === "route" && definition !== null && nameFromVariable !== null) {
-        const permission = stringProperty(definition, "permission");
+      } else if (primitive === "route") {
+        const name = nameFromVariable ?? "";
+        const permission = definition === null ? null : stringMember(checker, definition, "permission");
+        const extracted = definition === null
+          ? unresolvedCallbackContracts()
+          : extractCallbackTypeContracts(checker, definition, "handler");
+        const inputExpression = definition === null ? undefined : memberExpression(definition, "input");
+        const outputExpression = definition === null ? undefined : memberExpression(definition, "output");
         output.routes.push({
-          name: nameFromVariable,
-          method: stringProperty(definition, "method"),
-          path: stringProperty(definition, "path"),
-          feature,
-          contract: contractSignature(definition, bindings, ["input", "output"], true),
-          ...location(root, sourceFile, node),
+          ...identity("route", name, node),
+          method: definition === null ? null : stringMember(checker, definition, "method"),
+          path: definition === null ? null : stringMember(checker, definition, "path"),
+          input: contractSlot(
+            extracted.input,
+            inputExpression === undefined
+              ? extractRuntimeSchemaFacet(checker, undefined, "input")
+              : extractSchemaOrFieldsFacet(checker, inputExpression, "input"),
+          ),
+          output: contractSlot(
+            extracted.output,
+            extractRuntimeSchemaFacet(checker, outputExpression, "output"),
+          ),
+          access: definition === null ? "missing" : accessFor(definition),
           ...(permission === null ? {} : { permission }),
         });
         callbacks.push({
-          name: nameFromVariable,
+          name,
           kind: "route",
           ...location(root, sourceFile, node),
-          ...extractCallbackTypeContracts(checker, definition, "handler"),
+          ...extracted,
         });
         if (permission !== null) output.permissions.add(permission);
-      } else if (primitive === "event" && definition !== null) {
-        const name = stringProperty(definition, "name") ?? nameFromVariable;
-        if (name !== null) output.events.push({
-          name,
-          feature,
-          contract: contractSignature(definition, bindings, ["payload"]),
-          ...location(root, sourceFile, node),
+      } else if (primitive === "event") {
+        const name = definition === null ? (nameFromVariable ?? "") : (declaredName(definition, nameFromVariable) ?? "");
+        const payloadExpression = definition === null ? undefined : memberExpression(definition, "payload");
+        output.events.push({
+          ...identity("event", name, node),
+          payload: payloadExpression === undefined
+            ? missingRequiredSchemaFacet("payload")
+            : extractRuntimeSchemaFacet(checker, payloadExpression, "payload"),
         });
-      } else if (primitive === "defineAdapterContract" && definition !== null) {
-        const name = stringProperty(definition, "name") ?? nameFromVariable;
-        if (name !== null) output.adapters.push({
-          name,
+      } else if (primitive === "defineAdapterContract") {
+        const name = definition === null ? (nameFromVariable ?? "") : (declaredName(definition, nameFromVariable) ?? "");
+        const operationsExpression = definition === null ? undefined : memberExpression(definition, "operations");
+        const record: AdapterManifest & { readonly kind: "contract" } = {
+          ...identity("adapter-contract", name, node),
           kind: "contract",
-          feature,
-          contract: contractSignature(definition, bindings, ["operations"]),
-          ...location(root, sourceFile, node),
-        });
-      } else if (primitive === "implementAdapter" && nameFromVariable !== null) {
-        output.adapters.push({ name: nameFromVariable, kind: "implementation", feature, contract: null, ...location(root, sourceFile, node) });
+          operations: operationsExpression === undefined
+            ? { status: "unresolved", diagnostic: { code: "SC002", path: "operations", message: "The schema metadata type is invalid or unknown" } }
+            : extractAdapterOperationsFacet(checker, operationsExpression, "operations"),
+        };
+        output.adapters.push(record);
+        const declaration = variableDeclaration(node);
+        if (declaration !== null && ts.isIdentifier(declaration.name) && record.id !== null) {
+          const symbol = checker.getSymbolAtLocation(declaration.name);
+          if (symbol !== undefined) output.adapterContracts.set(symbol, record.id);
+        }
+      } else if (primitive === "implementAdapter") {
+        const name = nameFromVariable ?? "";
+        const record: AdapterManifest & { readonly kind: "implementation" } = {
+          ...identity("adapter-implementation", name, node),
+          kind: "implementation",
+          contractId: null,
+        };
+        output.adapters.push(record);
+        output.pendingAdapterLinks.push({ record, expression: node.arguments[0] });
       }
     }
     ts.forEachChild(node, visit);
@@ -480,11 +662,16 @@ function extractAllowances(root: string, sourceFile: ts.SourceFile, output: Muta
         )
       )
     ) {
-      const definition = objectArgument(node);
-      const rule = definition === null ? null : stringProperty(definition, "rule");
-      const reason = definition === null ? null : stringProperty(definition, "reason");
-      const expires = definition === null ? null : stringProperty(definition, "expires");
-      const target = definition === null ? null : stringProperty(definition, "target");
+      const definition = directObjectArgument(node);
+      const directString = (name: string): string | null => {
+        if (definition === null) return null;
+        const value = memberExpression(definition, name);
+        return value !== undefined && ts.isStringLiteralLike(value) ? value.text : null;
+      };
+      const rule = directString("rule");
+      const reason = directString("reason");
+      const expires = directString("expires");
+      const target = directString("target");
       let valid = rule !== null && rule.trim() !== "" && reason !== null && reason.trim() !== "";
       let issue: string | null = null;
       if (!valid) issue = "Architecture allowances require a nonblank literal rule and reason";
@@ -827,6 +1014,13 @@ function featureManifest(
   output: MutableManifest,
 ): FeatureManifest {
   const exports: PublicExportManifest[] = [];
+  const owner: SemanticIdOwner = { kind: "feature", name: feature.name };
+  const featureIdentity = {
+    id: semanticId("feature", owner, feature.name),
+    owner,
+    name: feature.name,
+    feature: feature.name,
+  };
   if (feature.boundary === undefined) {
     const file = relativeFile(root, feature.directory);
     output.diagnostics.push(diagnostic(
@@ -836,14 +1030,21 @@ function featureManifest(
       1,
       { suggestion: `Create src/features/${feature.name}/index.ts` },
     ));
-    return { name: feature.name, publicBoundary: null, exports, file, line: 1 };
+    return { ...featureIdentity, publicBoundary: null, exports, file, line: 1 };
   }
 
   const moduleSymbol = checker.getSymbolAtLocation(feature.boundary);
   for (const exported of moduleSymbol === undefined ? [] : checker.getExportsOfModule(moduleSymbol)) {
     const symbol = resolvedSymbol(checker, exported);
     const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0] ?? feature.boundary;
-    const entry = { name: exported.name, kind: symbolKind(symbol), ...location(root, declaration.getSourceFile(), declaration) };
+    const entry = {
+      id: semanticId("public-export", owner, exported.name),
+      owner,
+      name: exported.name,
+      feature: feature.name,
+      kind: symbolKind(symbol),
+      ...location(root, declaration.getSourceFile(), declaration),
+    };
     exports.push(entry);
     const type = symbolType(checker, symbol, declaration);
     if (typeHasAny(root, checker, type, new Set())) {
@@ -865,9 +1066,9 @@ function featureManifest(
       ));
     }
   }
-  exports.sort(compareNamed);
+  exports.sort(compareSemantic);
   const point = location(root, feature.boundary, feature.boundary);
-  return { name: feature.name, publicBoundary: point.file, exports, ...point };
+  return { ...featureIdentity, publicBoundary: point.file, exports, ...point };
 }
 
 function addCycleDiagnostics(root: string, features: readonly FeatureRecord[], output: MutableManifest): void {
@@ -905,6 +1106,128 @@ function addCycleDiagnostics(root: string, features: readonly FeatureRecord[], o
         : relativeFile(root, feature.boundary.fileName),
       1,
       { target: first },
+    ));
+  }
+}
+
+function adapterContractSymbol(checker: ts.TypeChecker, expression: ts.Expression, visited: Set<ts.Symbol>): ts.Symbol | null {
+  const current = unwrapTransparentExpression(expression);
+  if (!ts.isIdentifier(current) && !ts.isPropertyAccessExpression(current)) return null;
+  const symbolAtExpression = checker.getSymbolAtLocation(ts.isPropertyAccessExpression(current) ? current.name : current);
+  if (symbolAtExpression === undefined) return null;
+  const symbol = resolvedSymbol(checker, symbolAtExpression);
+  if (visited.has(symbol)) return null;
+  visited.add(symbol);
+  const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
+  if (
+    declaration !== undefined
+    && ts.isVariableDeclaration(declaration)
+    && declaration.initializer !== undefined
+    && (declaration.parent.flags & ts.NodeFlags.Const) !== 0
+  ) {
+    const alias = adapterContractSymbol(checker, declaration.initializer, visited);
+    if (alias !== null) return alias;
+  }
+  return symbol;
+}
+
+function resolveAdapterLinks(checker: ts.TypeChecker, output: MutableManifest): void {
+  for (const pending of output.pendingAdapterLinks) {
+    const symbol = pending.expression === undefined
+      ? null
+      : adapterContractSymbol(checker, pending.expression, new Set());
+    const contractId = symbol === null ? undefined : output.adapterContracts.get(symbol);
+    const index = output.adapters.indexOf(pending.record);
+    if (contractId !== undefined && index >= 0) {
+      output.adapters[index] = { ...pending.record, contractId };
+      continue;
+    }
+    output.diagnostics.push(diagnostic(
+      "adapter-link",
+      `Adapter implementation ${pending.record.name || "<unnamed>"} does not reference a declared adapter contract`,
+      pending.record.file,
+      pending.record.line,
+      pending.record.id === null ? {} : { target: pending.record.id },
+    ));
+  }
+}
+
+function addIdentityDiagnostics(records: readonly { readonly id: string | null; readonly name: string; readonly file: string; readonly line: number }[], output: MutableManifest): void {
+  for (const record of records) {
+    if (record.id !== null) continue;
+    output.diagnostics.push(diagnostic(
+      "semantic-identity",
+      "The recognized declaration cannot form a canonical semantic ID",
+      record.file,
+      record.line,
+    ));
+  }
+}
+
+function addContractDiagnostic(
+  facet: { readonly status: string; readonly diagnostic?: TypeContractDiagnostic },
+  locationPoint: SourceLocation,
+  target: string | null,
+  output: MutableManifest,
+): void {
+  if (facet.status !== "unresolved" || facet.diagnostic === undefined) return;
+  const underlying = facet.diagnostic;
+  output.diagnostics.push(diagnostic(
+    "contract-extraction",
+    `${underlying.code} at ${underlying.path}: ${underlying.message}`,
+    locationPoint.file,
+    locationPoint.line,
+    target === null ? {} : { target },
+  ));
+}
+
+function addContractDiagnostics(output: MutableManifest): void {
+  for (const model of output.models) addContractDiagnostic(model.fields, model, model.id, output);
+  for (const operation of output.operations) {
+    addContractDiagnostic(operation.input.staticType, operation, operation.id, output);
+    addContractDiagnostic(operation.input.runtimeSchema, operation, operation.id, output);
+    addContractDiagnostic(operation.output.staticType, operation, operation.id, output);
+    addContractDiagnostic(operation.output.runtimeSchema, operation, operation.id, output);
+  }
+  for (const route of output.routes) {
+    addContractDiagnostic(route.input.staticType, route, route.id, output);
+    addContractDiagnostic(route.input.runtimeSchema, route, route.id, output);
+    addContractDiagnostic(route.output.staticType, route, route.id, output);
+    addContractDiagnostic(route.output.runtimeSchema, route, route.id, output);
+  }
+  for (const event of output.events) addContractDiagnostic(event.payload, event, event.id, output);
+  for (const adapter of output.adapters) {
+    if (adapter.kind !== "contract") continue;
+    addContractDiagnostic(adapter.operations, adapter, adapter.id, output);
+    if (adapter.operations.status !== "resolved") continue;
+    for (const operation of Object.values(adapter.operations.operations)) {
+      addContractDiagnostic(operation.input, adapter, adapter.id, output);
+      addContractDiagnostic(operation.output, adapter, adapter.id, output);
+    }
+  }
+}
+
+function addDuplicateIdDiagnostics(
+  records: readonly { readonly id: string | null; readonly file: string; readonly line: number }[],
+  output: MutableManifest,
+): void {
+  const byId = new Map<string, SourceLocation[]>();
+  for (const record of records) {
+    if (record.id === null) continue;
+    const locations = byId.get(record.id) ?? [];
+    locations.push({ file: record.file, line: record.line });
+    byId.set(record.id, locations);
+  }
+  for (const [id, locations] of [...byId].sort(([left], [right]) => compareText(left, right))) {
+    if (locations.length < 2) continue;
+    locations.sort(compareLocated);
+    const anchor = locations[0]!;
+    output.diagnostics.push(diagnostic(
+      "duplicate-semantic-id",
+      `Duplicate semantic ID: ${id}`,
+      anchor.file,
+      anchor.line,
+      { target: id, related: locations },
     ));
   }
 }
@@ -951,6 +1274,17 @@ function compareLocated(a: { readonly file: string; readonly line: number }, b: 
   return compareText(a.file, b.file) || a.line - b.line;
 }
 
+function compareSemantic(
+  a: { readonly id: string | null; readonly name: string; readonly file: string; readonly line: number },
+  b: { readonly id: string | null; readonly name: string; readonly file: string; readonly line: number },
+): number {
+  if (a.id !== null && b.id === null) return -1;
+  if (a.id === null && b.id !== null) return 1;
+  return compareText(a.id ?? "", b.id ?? "")
+    || compareText(a.name, b.name)
+    || compareLocated(a, b);
+}
+
 function uniqueDependencies(dependencies: readonly DependencyManifest[]): DependencyManifest[] {
   const grouped = new Map<string, { entry: DependencyManifest; symbols: Set<string> }>();
   const sorted = [...dependencies]
@@ -988,6 +1322,8 @@ export function analyzeTypeContractsWithTypescript(
     dependencies: [],
     exceptions: [],
     diagnostics: [],
+    adapterContracts: new Map(),
+    pendingAdapterLinks: [],
   };
   const allowedExternalPackages = new Set(options.allowedExternalPackages ?? []);
   const callbacks: AnalyzedCallbackTypeContract[] = [];
@@ -1002,25 +1338,47 @@ export function analyzeTypeContractsWithTypescript(
     checkBoringTypeScript(root, sourceFile, output);
   }
 
+  resolveAdapterLinks(checker, output);
   const featureRecords = discoverFeatures(root, files);
   const features = featureRecords.map((feature) => featureManifest(root, feature, checker, output));
+  const semanticRecords = [
+    ...features,
+    ...features.flatMap((feature) => feature.exports),
+    ...output.models,
+    ...output.operations,
+    ...output.routes,
+    ...output.events,
+    ...output.adapters,
+  ];
+  addIdentityDiagnostics(semanticRecords, output);
+  addContractDiagnostics(output);
+  addDuplicateIdDiagnostics(semanticRecords, output);
   output.dependencies.splice(0, output.dependencies.length, ...uniqueDependencies(output.dependencies));
   addCycleDiagnostics(root, featureRecords, output);
   checkDuplicateOwners(output);
   applyAllowances(output);
 
-  output.models.sort(compareNamed);
-  output.operations.sort(compareNamed);
-  output.routes.sort(compareNamed);
-  output.events.sort(compareNamed);
-  output.adapters.sort(compareNamed);
+  features.sort(compareSemantic);
+  output.models.sort(compareSemantic);
+  output.operations.sort(compareSemantic);
+  output.routes.sort(compareSemantic);
+  output.events.sort(compareSemantic);
+  output.adapters.sort(compareSemantic);
   output.exceptions.sort(compareLocated);
   output.diagnostics.sort((a, b) => compareLocated(a, b) || compareText(a.rule, b.rule) || compareText(a.message, b.message));
 
   return {
     manifest: {
-      version: 1,
-      root: slash(root),
+      version: 2,
+      compiler: {
+        manifestVersion: 2,
+        typescriptVersion: "5.9.3",
+        schemaProtocolVersion: SCHEMA_PROTOCOL_VERSION,
+        canonicalSchemaVersion: CANONICAL_SCHEMA_VERSION,
+        typeContractVersion: TYPE_CONTRACT_VERSION,
+      },
+      packagePolicy: [],
+      packageUses: [],
       features,
       models: output.models,
       operations: output.operations,

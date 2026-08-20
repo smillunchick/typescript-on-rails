@@ -1,48 +1,31 @@
 import ts from "typescript";
 
+import { architecture } from "../../features/runtime/index.js";
+import type {
+  TypeContract,
+  TypeContractDiagnostic,
+  TypeContractNode,
+  TypeContractPrimitive,
+  TypeContractProperty,
+  TypeContractTupleElement,
+} from "../../features/architecture/manifest.js";
+
+architecture.allow({
+  rule: "boring-typescript",
+  reason: "TypeScript 5.9 checker flags prove compiler types before the required internal type refinements.",
+});
+
+export type {
+  TypeContract,
+  TypeContractDiagnostic,
+  TypeContractNode,
+  TypeContractPrimitive,
+  TypeContractProperty,
+  TypeContractTupleElement,
+} from "../../features/architecture/manifest.js";
+
 /** The TypeScript contract protocol is independent of the runtime schema protocol. */
 export const TYPE_CONTRACT_VERSION = 1 as const;
-
-export type TypeContractPrimitive = "bigint" | "boolean" | "number" | "string" | "symbol";
-
-export interface TypeContractProperty {
-  readonly name: string;
-  readonly type: string;
-  readonly optional: boolean;
-  readonly readonly: boolean;
-}
-
-export interface TypeContractTupleElement {
-  readonly type: string;
-  readonly optional: boolean;
-  readonly rest: boolean;
-}
-
-export type TypeContractNode =
-  | { readonly id: string; readonly kind: "primitive"; readonly name: TypeContractPrimitive }
-  | { readonly id: string; readonly kind: "literal"; readonly value: string | number | boolean | null; readonly valueType: "bigint" | "boolean" | "number" | "string" | "null" }
-  | { readonly id: string; readonly kind: "unknown" }
-  | { readonly id: string; readonly kind: "undefined" }
-  | { readonly id: string; readonly kind: "void" }
-  | { readonly id: string; readonly kind: "date" }
-  | { readonly id: string; readonly kind: "array"; readonly element: string; readonly readonly: boolean }
-  | { readonly id: string; readonly kind: "tuple"; readonly elements: readonly TypeContractTupleElement[]; readonly readonly: boolean }
-  | { readonly id: string; readonly kind: "object"; readonly properties: readonly TypeContractProperty[] }
-  | { readonly id: string; readonly kind: "union"; readonly members: readonly string[] };
-
-export interface TypeContract {
-  readonly version: typeof TYPE_CONTRACT_VERSION;
-  readonly root: string;
-  readonly nodes: readonly TypeContractNode[];
-}
-
-export interface TypeContractDiagnostic {
-  readonly code: string;
-  readonly path: string;
-  readonly message: string;
-  /** Checker display text is diagnostic detail only and never enters TypeContract. */
-  readonly detail?: string;
-}
 
 export type TypeContractFacet =
   | { readonly status: "resolved"; readonly contract: TypeContract; readonly labels: readonly string[] }

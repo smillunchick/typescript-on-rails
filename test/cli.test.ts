@@ -474,7 +474,13 @@ describe("app diff --architecture", () => {
     const result = await invoke(["diff", "--architecture", "--json"], app.root);
     assert.equal(result.code, 0, result.stderr);
     const diff = JSON.parse(result.stdout);
-    assert.deepEqual(diff.publicApis.added, [{ feature: "billing", name: "refundInvoice", kind: "value" }]);
+    assert.deepEqual(diff.publicApis.added, [{
+      id: "sid1/public-export/feature/billing/refundInvoice",
+      owner: { kind: "feature", name: "billing" },
+      feature: "billing",
+      name: "refundInvoice",
+      kind: "value",
+    }]);
     assert.equal(diff.changed, true);
 
     const unsafe = await invoke(["diff", "--architecture", "--base", "--upload-pack=bad"], app.root);

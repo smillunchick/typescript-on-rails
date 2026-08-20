@@ -5,6 +5,12 @@ export {
   type TypeContractAnalysis,
 } from "./analyze.js";
 export {
+  extractAdapterOperationsFacet,
+  extractRuntimeSchemaFacet,
+  extractSchemaFieldsFacet,
+  extractSchemaOrFieldsFacet,
+} from "./schema-contract.js";
+export {
   TYPE_CONTRACT_VERSION,
   canonicalTypeContract,
   extractCallbackTypeContracts,

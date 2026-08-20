@@ -1,9 +1,41 @@
-export { analyzeApplication, architecture } from "./features/architecture/index.js";
+export {
+  analyzeApplication,
+  architecture,
+  decodeSemanticId,
+  encodeSemanticId,
+} from "./features/architecture/index.js";
 export type {
+  AdapterContractManifest,
+  AdapterImplementationManifest,
+  AdapterManifest,
+  AdapterOperationFacet,
+  AdapterOperationsFacet,
   AnalyzeApplicationOptions,
   ArchitectureAllowance,
   ArchitectureDiagnostic,
   ArchitectureManifest,
+  ContractProvenance,
+  ContractSlot,
+  DeclaredContractSlot,
+  DeclaredRuntimeSchemaFacet,
+  ManifestCompilerMetadata,
+  OperationAccess,
+  OperationManifest,
+  PackageCapability,
+  PackagePolicyManifest,
+  PackageUseManifest,
+  RuntimeSchemaFacet,
+  SemanticId,
+  SemanticIdCategory,
+  SemanticIdOwner,
+  SemanticIdOwnerKind,
+  StaticTypeFacet,
+  TypeContract,
+  TypeContractDiagnostic,
+  TypeContractNode,
+  TypeContractPrimitive,
+  TypeContractProperty,
+  TypeContractTupleElement,
 } from "./features/architecture/index.js";
 export * from "./features/introspection/index.js";
 export * from "./features/runtime/index.js";

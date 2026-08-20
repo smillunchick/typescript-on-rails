@@ -35,14 +35,48 @@ export const invoiceRoute = route({ method: "GET", path: "/invoices/:id", input:
   return inspectApplication(fixture.root);
 }
 
+const billingOwner = { kind: "feature", name: "billing" } as const;
+const resolvedStringSchema = {
+  status: "resolved",
+  provenance: "declared-schema",
+  validator: "declared",
+  metadata: { kind: "string" },
+} as const;
+const resolvedStatic = {
+  status: "resolved",
+  provenance: "inferred-typescript",
+  contract: { version: 1, root: "n0", nodes: [{ id: "n0", kind: "primitive", name: "string" }] },
+  labels: [],
+} as const;
+const notDeclared = { status: "not-declared", validator: "not-declared" } as const;
+const declaredSlot = { staticType: resolvedStatic, runtimeSchema: resolvedStringSchema } as const;
+const inferredSlot = { staticType: resolvedStatic, runtimeSchema: notDeclared } as const;
+
+function record(category: string, name: string, feature = "billing") {
+  return {
+    id: `sid1/${category}/feature/${feature}/${name}`,
+    owner: { kind: "feature", name: feature } as const,
+    name,
+    feature,
+  };
+}
+
 function manifest(overrides: Partial<ArchitectureManifest> = {}): ArchitectureManifest {
   return {
-    version: 1,
-    root: "/app",
-    features: [{ name: "billing", publicBoundary: "src/features/billing/index.ts", exports: [{ name: "approveInvoice", kind: "value", file: "a.ts", line: 1 }], file: "a.ts", line: 1 }],
-    models: [{ name: "Invoice", feature: "billing", contract: "model-v1", file: "model.ts", line: 1 }],
-    operations: [{ name: "approveInvoice", kind: "action", feature: "billing", contract: "action-v1", permission: "invoice.approve", file: "actions.ts", line: 1 }],
-    routes: [{ name: "invoiceRoute", method: "GET", path: "/invoices/:id", feature: "billing", contract: "route-v1", permission: "invoice.read", file: "actions.ts", line: 2 }],
+    version: 2,
+    compiler: {
+      manifestVersion: 2,
+      typescriptVersion: "5.9.3",
+      schemaProtocolVersion: "1",
+      canonicalSchemaVersion: "1",
+      typeContractVersion: 1,
+    },
+    packagePolicy: [],
+    packageUses: [],
+    features: [{ ...record("feature", "billing"), publicBoundary: "src/features/billing/index.ts", exports: [{ ...record("public-export", "approveInvoice"), kind: "value", file: "a.ts", line: 1 }], file: "a.ts", line: 1 }],
+    models: [{ ...record("model", "Invoice"), fields: resolvedStringSchema, file: "model.ts", line: 1 }],
+    operations: [{ ...record("operation", "approveInvoice"), kind: "action", input: declaredSlot, output: inferredSlot, access: "permission", permission: "invoice.approve", file: "actions.ts", line: 1 }],
+    routes: [{ ...record("route", "invoiceRoute"), method: "GET", path: "/invoices/:id", input: declaredSlot, output: inferredSlot, access: "permission", permission: "invoice.read", file: "actions.ts", line: 2 }],
     events: [],
     adapters: [],
     permissions: ["invoice.approve", "invoice.read"],
@@ -103,8 +137,8 @@ describe("application introspection", () => {
   it("renders deterministic graph, owner, boundary, exception, and impact projections", () => {
     const source = manifest({
       features: [
-        { name: "billing", publicBoundary: "src/features/billing/index.ts", exports: [{ name: "approveInvoice", kind: "value", file: "a.ts", line: 1 }], file: "a.ts", line: 1 },
-        { name: "reports", publicBoundary: "src/features/reports/index.ts", exports: [], file: "r.ts", line: 1 },
+        { ...record("feature", "billing"), publicBoundary: "src/features/billing/index.ts", exports: [{ ...record("public-export", "approveInvoice"), kind: "value", file: "a.ts", line: 1 }], file: "a.ts", line: 1 },
+        { ...record("feature", "reports", "reports"), publicBoundary: "src/features/reports/index.ts", exports: [], file: "r.ts", line: 1 },
       ],
       dependencies: [{ from: "reports", to: "billing", symbols: ["approveInvoice"], file: "r.ts", line: 4 }],
       exceptions: [{ rule: "external-io", reason: "Migration", target: "legacy", valid: true, file: "a.ts", line: 3 }],
@@ -124,7 +158,6 @@ describe("semantic architecture diff", () => {
   it("ignores source paths and line-number noise", () => {
     const before = manifest();
     const after = manifest({
-      root: "/other",
       features: before.features.map((entry) => ({ ...entry, file: "moved.ts", line: 99, exports: entry.exports.map((item) => ({ ...item, file: "moved.ts", line: 100 })) })),
       models: before.models.map((entry) => ({ ...entry, file: "moved.ts", line: 50 })),
       operations: before.operations.map((entry) => ({ ...entry, file: "moved.ts", line: 51 })),
@@ -139,32 +172,33 @@ describe("semantic architecture diff", () => {
   it("reports semantic additions, removals, and changes", () => {
     const before = manifest();
     const after = manifest({
-      models: [{ name: "Invoice", feature: "accounts", contract: "model-v1", file: "x.ts", line: 1 }],
-      routes: [{ name: "invoiceRoute", method: "POST", path: "/invoices", feature: "billing", contract: "route-v1", permission: "invoice.create", file: "x.ts", line: 2 }],
+      models: [{ ...record("model", "Invoice", "accounts"), fields: resolvedStringSchema, file: "x.ts", line: 1 }],
+      routes: [{ ...record("route", "invoiceRoute"), method: "POST", path: "/invoices", input: declaredSlot, output: inferredSlot, access: "permission", permission: "invoice.create", file: "x.ts", line: 2 }],
       permissions: ["invoice.create"],
-      events: [{ name: "InvoiceCreated", feature: "billing", contract: "event-v1", file: "x.ts", line: 3 }],
+      events: [{ ...record("event", "InvoiceCreated"), payload: resolvedStringSchema, file: "x.ts", line: 3 }],
     });
     const diff = diffArchitecture(before, after);
 
     assert.equal(diff.changed, true);
-    assert.deepEqual(diff.models.changed, [{ before: { name: "Invoice", feature: "billing", contract: "model-v1" }, after: { name: "Invoice", feature: "accounts", contract: "model-v1" } }]);
+    assert.deepEqual(diff.models.removed.map((entry) => entry.name), ["Invoice"]);
+    assert.deepEqual(diff.models.added.map((entry) => entry.name), ["Invoice"]);
     assert.deepEqual(diff.permissions.added, ["invoice.create"]);
     assert.deepEqual(diff.permissions.removed, ["invoice.approve", "invoice.read"]);
     assert.equal(diff.routes.changed.length, 1);
-    assert.deepEqual(diff.events.added, [{ name: "InvoiceCreated", feature: "billing", contract: "event-v1" }]);
-    assert.match(formatArchitectureDiff(diff), /Model changed: Invoice/);
+    assert.deepEqual(diff.events.added.map((entry) => entry.name), ["InvoiceCreated"]);
+    assert.match(formatArchitectureDiff(diff), /Model added: Invoice/);
   });
 
   it("reports static contract-shape and access changes", () => {
     const before = manifest({
-      events: [{ name: "InvoicePaid", feature: "billing", contract: "event-v1", file: "events.ts", line: 1 }],
-      adapters: [{ name: "Payments", kind: "contract", feature: "billing", contract: "adapter-v1", file: "payments.ts", line: 1 }],
+      events: [{ ...record("event", "InvoicePaid"), payload: resolvedStringSchema, file: "events.ts", line: 1 }],
+      adapters: [{ ...record("adapter-contract", "Payments"), kind: "contract", operations: { status: "resolved", operations: {} }, file: "payments.ts", line: 1 }],
     });
     const after = manifest({
-      models: before.models.map((entry) => ({ ...entry, contract: "model-v2" })),
-      operations: before.operations.map((entry) => ({ ...entry, contract: "action-v2", permission: "invoice.admin" })),
-      events: before.events.map((entry) => ({ ...entry, contract: "event-v2" })),
-      adapters: before.adapters.map((entry) => ({ ...entry, contract: "adapter-v2" })),
+      models: before.models.map((entry) => ({ ...entry, fields: { ...resolvedStringSchema, metadata: { kind: "number" } } })),
+      operations: before.operations.map((entry) => ({ ...entry, access: "authorize" as const, permission: "invoice.admin" })),
+      events: before.events.map((entry) => ({ ...entry, payload: { ...resolvedStringSchema, metadata: { kind: "boolean" } } })),
+      adapters: before.adapters.map((entry) => entry.kind === "contract" ? { ...entry, operations: { status: "unresolved" as const, diagnostic: { code: "SC002", path: "operations", message: "invalid" } } } : entry),
       permissions: ["invoice.admin", "invoice.read"],
     });
 
