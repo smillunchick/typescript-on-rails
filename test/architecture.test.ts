@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
+import ts from "typescript";
 
 import {
   analyzeApplication,
@@ -9,6 +10,7 @@ import {
   type ArchitectureManifest,
   type PackageCapability,
 } from "../src/features/architecture/index.js";
+import { resolveSourceRole } from "../src/infra/typescript/source-role.js";
 import { createAppFixture, type AppFixture } from "./helpers/app-fixture.js";
 
 const fixtures: AppFixture[] = [];
@@ -224,8 +226,9 @@ export { loose, sure, cast, later, old, Decorated };
       "src/features/unsafe/other.ts": `export const other = true;`,
     });
     const boring = manifest.diagnostics.filter((entry) => entry.rule === "boring-typescript");
-    assert.ok(boring.length >= 6);
+    assert.ok(boring.length >= 5);
     assert.ok(boring.some((entry) => /Decorators/.test(entry.message)));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "dynamic-import"));
   });
 
   it("reports public any types, vendor type leakage, and duplicate model owners", async () => {
@@ -611,5 +614,145 @@ export { second, first, again };
       zeta: "CHOOSE: pure | ui | external-system | host-io",
     });
     assert.equal(before, after);
+  });
+
+  it("scopes source-role path signals to the application root", () => {
+    const sourceFile = ts.createSourceFile(
+      "/workspace/ui/application/src/app.ts",
+      "export const app = true;",
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+
+    assert.deepEqual(resolveSourceRole("/workspace/ui/application", sourceFile).effectiveRoles, ["application"]);
+  });
+
+  it("allows literal dynamic imports in UI and infrastructure and records namespace dependencies, packages, and cycles", async () => {
+    const manifest = await analyze({
+      "src/features/a/index.ts": emptyBoundary,
+      "src/features/a/ui/view.ts": `void import("@/features/b"); void import("ui-library");`,
+      "src/features/b/index.ts": emptyBoundary,
+      "src/features/b/view.client.ts": "void import(`@/features/a`);",
+      "src/infra/lazy.ts": "void import(`external-library`);",
+    }, capabilities({
+      "ui-library": "ui",
+      "external-library": "external-system",
+    }));
+
+    assert.equal(manifest.diagnostics.filter((entry) => entry.rule === "dynamic-import").length, 0);
+    assert.deepEqual(manifest.dependencies.map(({ from, to, symbols }) => ({ from, to, symbols })), [
+      { from: "a", to: "b", symbols: ["*"] },
+      { from: "b", to: "a", symbols: ["*"] },
+    ]);
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "feature-cycle" && /a -> b -> a/.test(entry.message)));
+    assert.deepEqual(manifest.packageUses.map((entry) => entry.package), ["external-library", "ui-library"]);
+  });
+
+  it("denies literal dynamic imports in domain and application roles and rejects every computed form in every role", async () => {
+    const computed = `
+const part = "target";
+void import(\`./\${part}.js\`);
+void import("./" + part);
+void import(part);
+void import();
+`;
+    const manifest = await analyze({
+      "src/features/roles/index.ts": emptyBoundary,
+      "src/features/roles/model.ts": `void import("./target.js"); ${computed}`,
+      "src/features/roles/ui/view.ts": computed,
+      "src/infra/computed.ts": computed,
+      "src/app.ts": `void import("./target.js"); ${computed}`,
+      "src/features/roles/target.ts": `export const target = true;`,
+    });
+
+    const dynamic = manifest.diagnostics.filter((entry) => entry.rule === "dynamic-import");
+    assert.equal(dynamic.filter((entry) => /not allowed for source role/.test(entry.message)).length, 2);
+    assert.equal(dynamic.filter((entry) => /requires one string literal/.test(entry.message)).length, 16);
+    assert.ok(dynamic.some((entry) => entry.file.endsWith("model.ts") && /domain/.test(entry.message)));
+    assert.ok(dynamic.some((entry) => entry.file.endsWith("app.ts") && /application/.test(entry.message)));
+  });
+
+  it("keeps literal dynamic imports in normal boundary, alias, runtime, and package analysis", async () => {
+    const manifest = await analyze({
+      "src/features/a/index.ts": emptyBoundary,
+      "src/features/a/view.client.ts": `
+void import("../b/private.js");
+void import("@/infra/tool.js");
+void import("./secret.server.js");
+void import("vendor-sdk");
+void import("missing-sdk/subpath");
+`,
+      "src/features/a/secret.server.ts": `export const secret = true;`,
+      "src/features/a/model.ts": `void import("./ui/card.js"); void import("./ui/types.js");`,
+      "src/features/a/ui/card.ts": `export const card = true;`,
+      "src/features/a/ui/types.d.ts": `export declare const types: true;`,
+      "src/features/b/index.ts": emptyBoundary,
+      "src/features/b/private.ts": `export const privateValue = true;`,
+      "src/infra/tool.ts": `export const tool = true;`,
+    }, capabilities({ "vendor-sdk": "external-system" }));
+
+    assert.ok(manifest.dependencies.some((entry) => entry.from === "a" && entry.to === "b" && entry.symbols.includes("*")));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "feature-boundary" && entry.target === "b"));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "runtime-boundary" && entry.target === "@/infra/tool.js"));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "runtime-boundary" && entry.target === "./secret.server.js"));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "domain-ui" && entry.target === "./ui/card.js"));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "domain-ui" && entry.target === "./ui/types.js"));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "package-capability" && entry.target === "vendor-sdk"));
+    assert.ok(manifest.diagnostics.some((entry) => entry.packageCapabilityMigration?.inventory.some((item) => item.package === "missing-sdk") === true));
+    assert.ok(manifest.packageUses.some((entry) => entry.package === "vendor-sdk"));
+  });
+
+  it("reports role conflicts once and applies the strict role union without granting dynamic or package access", async () => {
+    const manifest = await analyze({
+      "src/features/roles/index.ts": emptyBoundary,
+      "src/features/roles/model.ts": `"use client"; void import("ui-library");`,
+      "src/features/roles/ui/policy.ts": `void import("ui-library");`,
+      "src/infra/ui/view.ts": `void import("ui-library"); void import("external-library");`,
+    }, capabilities({
+      "ui-library": "ui",
+      "external-library": "external-system",
+    }));
+
+    const conflicts = manifest.diagnostics.filter((entry) => entry.rule === "source-role");
+    assert.equal(conflicts.length, 3);
+    assert.equal(conflicts.filter((entry) => /ui\/client/.test(entry.message) && /domain/.test(entry.message)).length, 2);
+    assert.ok(conflicts.some((entry) => /infrastructure/.test(entry.message) && /ui\/client/.test(entry.message)));
+    assert.equal(manifest.diagnostics.filter((entry) => entry.rule === "dynamic-import").length, 2);
+    assert.equal(manifest.diagnostics.filter((entry) => entry.rule === "package-capability" && entry.target === "ui-library").length, 3);
+    assert.equal(manifest.diagnostics.filter((entry) => entry.rule === "package-capability" && entry.target === "external-library").length, 1);
+    assert.equal(manifest.packageUses.filter((entry) => entry.package === "ui-library").length, 3);
+  });
+
+  it("keeps unsafe TypeScript and all require forms global in every source role", async () => {
+    const unsafe = `
+import legacy = require("legacy");
+let value: any;
+value!;
+value as string;
+require("legacy");
+function mark<T extends new (...args: never[]) => object>(item: T): T { return item; }
+@mark class Decorated {}
+export { value, Decorated };
+`;
+    const manifest = await analyze({
+      "src/features/unsafe/index.ts": emptyBoundary,
+      "src/features/unsafe/model.ts": unsafe,
+      "src/features/unsafe/ui/view.ts": unsafe,
+      "src/infra/unsafe.ts": unsafe,
+      "src/app.ts": unsafe,
+    });
+
+    for (const file of ["model.ts", "ui/view.ts", "infra/unsafe.ts", "app.ts"]) {
+      const messages = manifest.diagnostics
+        .filter((entry) => entry.rule === "boring-typescript" && entry.file.endsWith(file))
+        .map((entry) => entry.message);
+      assert.ok(messages.some((message) => /Explicit any/.test(message)), file);
+      assert.ok(messages.some((message) => /Non-null/.test(message)), file);
+      assert.ok(messages.some((message) => /Unchecked type assertions/.test(message)), file);
+      assert.ok(messages.some((message) => /Dynamic require/.test(message)), file);
+      assert.ok(messages.some((message) => /import = require/.test(message)), file);
+      assert.ok(messages.some((message) => /Decorators/.test(message)), file);
+    }
   });
 });

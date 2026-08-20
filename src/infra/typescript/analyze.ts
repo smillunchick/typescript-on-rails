@@ -24,6 +24,11 @@ import {
   type CallbackTypeContracts,
   type TypeContractFacet,
 } from "./type-contract.js";
+import {
+  resolveSourceRole,
+  type SourceRole,
+  type SourceRoleResolution,
+} from "./source-role.js";
 import type {
   AdapterManifest,
   AnalyzeApplicationOptions,
@@ -71,6 +76,8 @@ const RULE_CODES: Readonly<Record<string, string>> = {
   "adapter-link": "ARCH015",
   "contract-extraction": "ARCH016",
   "package-policy": "ARCH017",
+  "source-role": "ARCH018",
+  "dynamic-import": "ARCH019",
 };
 
 interface PendingAdapterLink {
@@ -119,12 +126,15 @@ interface FrameworkBindings {
   readonly namespaces: ReadonlySet<string>;
 }
 
-type ModuleReference = ts.ImportDeclaration | ts.ExportDeclaration;
+type StaticModuleReference = ts.ImportDeclaration | ts.ExportDeclaration;
+type ModuleReference = StaticModuleReference | ts.CallExpression;
 
 interface ModuleReferenceRecord {
   readonly node: ModuleReference;
-  readonly specifier: string;
+  readonly specifier?: string;
+  readonly specifierNode: ts.Node;
   readonly typeOnly: boolean;
+  readonly dynamic: boolean;
   readonly resolved?: string;
 }
 
@@ -712,12 +722,42 @@ function moduleReferencesFor(sourceFile: ts.SourceFile, compilerOptions: ts.Comp
       typeOnly = statement.isTypeOnly;
     }
     const resolved = ts.resolveModuleName(specifier, sourceFile.fileName, compilerOptions, ts.sys).resolvedModule?.resolvedFileName;
-    references.push({ node: statement, specifier, typeOnly, ...(resolved === undefined ? {} : { resolved }) });
+    references.push({
+      node: statement,
+      specifier,
+      specifierNode: statement.moduleSpecifier,
+      typeOnly,
+      dynamic: false,
+      ...(resolved === undefined ? {} : { resolved }),
+    });
   }
+
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const argument = node.arguments[0];
+      const specifier = argument !== undefined && (ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
+        ? argument.text
+        : undefined;
+      const resolved = specifier === undefined
+        ? undefined
+        : ts.resolveModuleName(specifier, sourceFile.fileName, compilerOptions, ts.sys).resolvedModule?.resolvedFileName;
+      references.push({
+        node,
+        ...(specifier === undefined ? {} : { specifier }),
+        specifierNode: argument ?? node,
+        typeOnly: false,
+        dynamic: true,
+        ...(resolved === undefined ? {} : { resolved }),
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
   return references;
 }
 
 function referencedPublicSymbols(node: ModuleReference): string[] {
+  if (ts.isCallExpression(node)) return ["*"];
   if (ts.isExportDeclaration(node)) {
     if (node.exportClause === undefined || ts.isNamespaceExport(node.exportClause)) return ["*"];
     return [...new Set(node.exportClause.elements.map((element) => element.propertyName?.text ?? element.name.text))]
@@ -738,51 +778,27 @@ function packagePolicyMap(entries: readonly PackagePolicyEntry[]): ReadonlyMap<s
   return new Map(entries.map((entry) => [entry.package, entry.capability]));
 }
 
-function effectiveSourceRole(
-  root: string,
-  sourceFile: ts.SourceFile,
-  role: ReturnType<typeof pathRole>,
-): "infrastructure" | "ui/client" | "domain" | "application" {
-  if (isInfra(root, sourceFile.fileName)) return "infrastructure";
-  if (role.client || role.ui || hasUseClient(sourceFile)) return "ui/client";
-  return role.domain ? "domain" : "application";
-}
-
 function requiredCapabilityBoundary(capability: PackagePolicyEntry["capability"]): string {
   if (capability === "pure") return "all current source roles";
   if (capability === "ui") return "UI/client code only";
   return "infrastructure code only";
 }
 
-function capabilityAllowed(
-  capability: PackagePolicyEntry["capability"],
-  role: ReturnType<typeof effectiveSourceRole>,
-): boolean {
+function capabilityAllowed(capability: PackagePolicyEntry["capability"], role: SourceRole): boolean {
   if (capability === "pure") return true;
   if (capability === "ui") return role === "ui/client";
   return role === "infrastructure";
 }
 
+function capabilityAllowedForEveryRole(
+  capability: PackagePolicyEntry["capability"],
+  roles: readonly SourceRole[],
+): boolean {
+  return roles.every((role) => capabilityAllowed(capability, role));
+}
+
 function isInfra(root: string, fileName: string): boolean {
   return inside(path.join(root, "src", "infra"), fileName);
-}
-
-function pathRole(fileName: string): { readonly client: boolean; readonly domain: boolean; readonly ui: boolean } {
-  const normalized = slash(fileName);
-  const basename = path.basename(normalized);
-  return {
-    client: /\.client\.tsx?$/.test(basename),
-    domain: /\/(model|schema|policy|actions|queries)\.tsx?$/.test(normalized) || /\/(actions|queries)\//.test(normalized),
-    ui: /\/ui\//.test(normalized),
-  };
-}
-
-function hasUseClient(sourceFile: ts.SourceFile): boolean {
-  return sourceFile.statements.some(
-    (statement) => ts.isExpressionStatement(statement)
-      && ts.isStringLiteral(statement.expression)
-      && statement.expression.text === "use client",
-  );
 }
 
 function referencedValueDeclarationFiles(checker: ts.TypeChecker, node: ModuleReference): string[] {
@@ -792,7 +808,15 @@ function referencedValueDeclarationFiles(checker: ts.TypeChecker, node: ModuleRe
     const symbol = checker.getSymbolAtLocation(name);
     if (symbol !== undefined) symbols.push(resolvedSymbol(checker, symbol));
   };
-  if (ts.isImportDeclaration(node)) {
+  const addModuleExports = (moduleSpecifier: ts.Node | undefined): void => {
+    const moduleSymbol = moduleSpecifier === undefined ? undefined : checker.getSymbolAtLocation(moduleSpecifier);
+    if (moduleSymbol !== undefined) {
+      for (const exported of checker.getExportsOfModule(moduleSymbol)) symbols.push(resolvedSymbol(checker, exported));
+    }
+  };
+  if (ts.isCallExpression(node)) {
+    addModuleExports(node.arguments[0]);
+  } else if (ts.isImportDeclaration(node)) {
     const clause = node.importClause;
     if (clause === undefined || clause.isTypeOnly) return [];
     if (clause.name !== undefined) addSymbol(clause.name);
@@ -810,11 +834,7 @@ function referencedValueDeclarationFiles(checker: ts.TypeChecker, node: ModuleRe
   } else if (node.exportClause !== undefined && ts.isNamedExports(node.exportClause)) {
     for (const element of node.exportClause.elements) if (!element.isTypeOnly) addSymbol(element.name);
   } else {
-    const moduleSpecifier = node.moduleSpecifier;
-    const moduleSymbol = moduleSpecifier === undefined ? undefined : checker.getSymbolAtLocation(moduleSpecifier);
-    if (moduleSymbol !== undefined) {
-      for (const exported of checker.getExportsOfModule(moduleSymbol)) symbols.push(resolvedSymbol(checker, exported));
-    }
+    addModuleExports(node.moduleSpecifier);
   }
   return [...new Set(symbols.flatMap((symbol) => symbol.declarations ?? []).map((entry) => entry.getSourceFile().fileName))];
 }
@@ -824,17 +844,51 @@ function checkImports(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
   compilerOptions: ts.CompilerOptions,
+  sourceRoles: ReadonlyMap<string, SourceRoleResolution>,
   policy: ReadonlyMap<string, PackagePolicyEntry["capability"]>,
   blockedPackages: ReadonlySet<string>,
   output: MutableManifest,
 ): void {
   const sourceFeature = featureNameFor(root, sourceFile.fileName);
-  const sourceRole = pathRole(sourceFile.fileName);
-  const client = sourceRole.client || hasUseClient(sourceFile);
+  const sourceRole = sourceRoles.get(path.resolve(sourceFile.fileName)) ?? resolveSourceRole(root, sourceFile);
+  const rolesText = sourceRole.effectiveRoles.join(", ");
+  if (sourceRole.conflict) {
+    const point = location(root, sourceFile, sourceFile);
+    const signals = sourceRole.signals.map((entry) => `${entry.role} (${entry.signal})`).join(", ");
+    output.diagnostics.push(diagnostic(
+      "source-role",
+      `Source file has conflicting explicit roles: ${signals}`,
+      point.file,
+      point.line,
+    ));
+  }
+
   for (const entry of moduleReferencesFor(sourceFile, compilerOptions)) {
-    const moduleSpecifier = entry.node.moduleSpecifier;
-    if (moduleSpecifier === undefined) continue;
-    const importLocation = location(root, sourceFile, moduleSpecifier);
+    const importLocation = location(root, sourceFile, entry.specifierNode);
+    if (entry.dynamic) {
+      if (entry.specifier === undefined) {
+        output.diagnostics.push(diagnostic(
+          "dynamic-import",
+          "Dynamic import() requires one string literal or no-substitution template literal specifier",
+          importLocation.file,
+          importLocation.line,
+        ));
+        continue;
+      }
+      const allowed = sourceRole.effectiveRoles.every((role) => role === "infrastructure" || role === "ui/client");
+      if (!allowed) {
+        output.diagnostics.push(diagnostic(
+          "dynamic-import",
+          `Literal dynamic import() is not allowed for source role ${rolesText}`,
+          importLocation.file,
+          importLocation.line,
+          { target: entry.specifier },
+        ));
+      }
+    }
+
+    const specifier = entry.specifier;
+    if (specifier === undefined) continue;
     const targetFeature = entry.resolved === undefined ? null : featureNameFor(root, entry.resolved);
     if (sourceFeature !== null && targetFeature !== null && sourceFeature !== targetFeature) {
       output.dependencies.push({
@@ -855,10 +909,12 @@ function checkImports(
       }
     }
 
-    const targetRole = entry.resolved === undefined ? null : pathRole(entry.resolved);
-    const packageIdentity = runtimePackageIdentity(entry.specifier);
+    const targetRole = entry.resolved === undefined
+      ? undefined
+      : sourceRoles.get(path.resolve(entry.resolved));
+    const packageIdentity = runtimePackageIdentity(specifier);
     const nodeModule = packageIdentity?.nodeCapability !== undefined;
-    if (client && !entry.typeOnly) {
+    if (sourceRole.effectiveRoles.includes("ui/client") && !entry.typeOnly) {
       const runtimeTargets = [
         ...(entry.resolved === undefined ? [] : [entry.resolved]),
         ...referencedValueDeclarationFiles(checker, entry.node),
@@ -872,35 +928,35 @@ function checkImports(
       if (unsafeTarget) {
         output.diagnostics.push(diagnostic(
           "runtime-boundary",
-          `Client code cannot import server-only module ${entry.specifier}`,
+          `Client code cannot import server-only module ${specifier}`,
           importLocation.file,
           importLocation.line,
-          { target: entry.specifier },
+          { target: specifier },
         ));
       }
     }
-    if (sourceRole.domain && targetRole?.ui === true) {
+    if (sourceRole.effectiveRoles.includes("domain") && targetRole?.effectiveRoles.includes("ui/client") === true) {
       output.diagnostics.push(diagnostic(
         "domain-ui",
-        `Domain code cannot import UI module ${entry.specifier}`,
+        `Domain code cannot import UI module ${specifier}`,
         importLocation.file,
         importLocation.line,
-        { target: entry.specifier },
+        { target: specifier },
       ));
     }
 
     const isInternal = entry.resolved !== undefined && inside(path.join(root, "src"), entry.resolved);
     if (entry.typeOnly || isInternal) continue;
     if (packageIdentity === null) {
-      if (!entry.specifier.startsWith(".") && !entry.specifier.startsWith("/")) {
+      if (!specifier.startsWith(".") && !specifier.startsWith("/")) {
         output.diagnostics.push(diagnostic(
           "package-capability",
-          `Runtime module specifier ${JSON.stringify(entry.specifier)} cannot be mapped to an exact package capability key`,
+          `Runtime module specifier ${JSON.stringify(specifier)} cannot be mapped to an exact package capability key`,
           importLocation.file,
           importLocation.line,
           {
             suggestion: "Import the external package by its package root or exact subpath",
-            target: entry.specifier,
+            target: specifier,
           },
         ));
       }
@@ -927,11 +983,10 @@ function checkImports(
       capability,
       ...importLocation,
     });
-    const role = effectiveSourceRole(root, sourceFile, sourceRole);
-    if (!capabilityAllowed(capability, role)) {
+    if (!capabilityAllowedForEveryRole(capability, sourceRole.effectiveRoles)) {
       output.diagnostics.push(diagnostic(
         "package-capability",
-        `Package ${packageIdentity.exact} has capability ${capability}; current role ${role} requires ${requiredCapabilityBoundary(capability)}`,
+        `Package ${packageIdentity.exact} has capability ${capability}; current role ${rolesText} requires ${requiredCapabilityBoundary(capability)}`,
         importLocation.file,
         importLocation.line,
         { target: packageIdentity.exact },
@@ -951,8 +1006,8 @@ function checkBoringTypeScript(root: string, sourceFile: ts.SourceFile, output: 
     else if (ts.isTypeAssertionExpression(node)) report(node, "Unchecked type assertions are not allowed");
     else if (ts.isAsExpression(node) && !(ts.isTypeReferenceNode(node.type) && node.type.typeName.getText() === "const")) {
       report(node, "Unchecked type assertions are not allowed");
-    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      report(node, "Dynamic import() is not allowed");
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      report(node, "External import = require() is not allowed");
     } else if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "require") {
       report(node, "Dynamic require() is not allowed");
     }
@@ -1389,7 +1444,14 @@ export function analyzeTypeContractsWithTypescript(
   const root = path.resolve(applicationRoot);
   const loaded = loadProgram(root, options);
   const checker = loaded.program.getTypeChecker();
-  const files = loaded.program.getSourceFiles().filter((sourceFile) => isApplicationSource(root, sourceFile));
+  const programFiles = loaded.program.getSourceFiles();
+  const files = programFiles.filter((sourceFile) => isApplicationSource(root, sourceFile));
+  const sourceRoles = new Map(programFiles
+    .filter((sourceFile) => inside(path.join(root, "src"), sourceFile.fileName))
+    .map((sourceFile) => [
+      path.resolve(sourceFile.fileName),
+      resolveSourceRole(root, sourceFile),
+    ]));
   const selectedPolicy = selectPackagePolicy(root, options);
   const policy = packagePolicyMap(selectedPolicy.entries);
   const blockedPackages = new Set(selectedPolicy.blockedPackages);
@@ -1427,7 +1489,7 @@ export function analyzeTypeContractsWithTypescript(
   for (const sourceFile of files) extractAllowances(root, sourceFile, output);
   for (const sourceFile of files) {
     extractDeclarations(root, sourceFile, checker, output, callbacks);
-    checkImports(root, sourceFile, checker, loaded.compilerOptions, policy, blockedPackages, output);
+    checkImports(root, sourceFile, checker, loaded.compilerOptions, sourceRoles, policy, blockedPackages, output);
     checkBoringTypeScript(root, sourceFile, output);
   }
 
