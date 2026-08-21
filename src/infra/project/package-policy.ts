@@ -5,6 +5,7 @@ import path from "node:path";
 import type { PackageCapability } from "../../features/runtime/index.js";
 
 const FRAMEWORK_PACKAGE = "typescript-on-rails";
+export const PACKAGE_POLICY_RULE = "package-policy";
 const CAPABILITIES = new Set<string>([
   "pure",
   "ui",

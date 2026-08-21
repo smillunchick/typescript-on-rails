@@ -1,11 +1,13 @@
 import type { ArchitectureManifest } from "../architecture/index.js";
 import type { FeatureExplanation, RouteExplanation } from "./inspector.js";
+import { assertComparableManifestV2 } from "./manifest-compatibility.js";
 
 function escapeDot(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 export function graphAsText(manifest: ArchitectureManifest): string {
+  assertComparableManifestV2(manifest);
   const dependencies = new Map<string, string[]>();
   for (const feature of manifest.features) dependencies.set(feature.name, []);
   for (const edge of manifest.dependencies) {
@@ -23,6 +25,7 @@ export function graphAsText(manifest: ArchitectureManifest): string {
 }
 
 export function graphAsDot(manifest: ArchitectureManifest): string {
+  assertComparableManifestV2(manifest);
   const lines = ["digraph architecture {"];
   for (const feature of manifest.features.map((entry) => entry.name).sort()) {
     lines.push(`  "${escapeDot(feature)}";`);
@@ -44,24 +47,27 @@ function list(label: string, values: readonly string[]): string {
 
 export function formatFeatureExplanation(explanation: FeatureExplanation): string {
   return [
-    explanation.name,
+    explanation.displayName,
+    `Semantic ID: ${explanation.id}`,
     `Public boundary: ${explanation.publicBoundary ?? "missing"}`,
-    list("Public API", explanation.publicApi.map((entry) => entry.name)),
-    list("Models", explanation.models),
-    list("Actions", explanation.actions),
-    list("Queries", explanation.queries),
-    list("Routes", explanation.routes),
+    list("Public API", explanation.publicApi.map((entry) => `${entry.displayName} [${entry.id}]`)),
+    list("Models", explanation.models.map((entry) => `${entry.displayName} [${entry.id}]`)),
+    list("Actions", explanation.actions.map((entry) => `${entry.displayName} [${entry.id}]`)),
+    list("Queries", explanation.queries.map((entry) => `${entry.displayName} [${entry.id}]`)),
+    list("Routes", explanation.routes.map((entry) => `${entry.method ?? "?"} ${entry.path ?? entry.displayName} [${entry.id}]`)),
     list("Permissions", explanation.permissions),
-    list("Events", explanation.events),
-    list("Adapters", explanation.adapters),
-    list("Depends on", explanation.dependencies),
-    list("Called by", explanation.dependents),
+    list("Events", explanation.events.map((entry) => `${entry.displayName} [${entry.id}]`)),
+    list("Adapters", explanation.adapters.map((entry) => `${entry.displayName} [${entry.id}]`)),
+    list("Depends on", explanation.dependencies.map((entry) => `${entry.displayName} [${entry.id}]`)),
+    list("Called by", explanation.dependents.map((entry) => `${entry.displayName} [${entry.id}]`)),
   ].join("\n") + "\n";
 }
 
 export function formatRouteExplanation(explanation: RouteExplanation): string {
   return [
-    `${explanation.method ?? "?"} ${explanation.path ?? explanation.name}`,
+    explanation.displayName,
+    `Semantic ID: ${explanation.id}`,
+    `Route: ${explanation.method ?? "?"} ${explanation.path ?? explanation.name}`,
     `Name: ${explanation.name}`,
     `Feature: ${explanation.feature ?? "none"}`,
     `Permission: ${explanation.permission ?? "none"}`,

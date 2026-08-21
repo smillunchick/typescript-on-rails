@@ -46,6 +46,22 @@ describe("testing helpers", () => {
     }
   });
 
+  it("retains unresolved semantic identities as architecture-check evidence", async () => {
+    const fixture = await createAppFixture({
+      "src/features/models/index.ts": `
+import { defineModel, string } from "typescript-on-rails";
+export const Broken = defineModel({ name: "", fields: { value: string() } });
+`,
+    });
+    try {
+      const manifest = analyzeApplication(fixture.root);
+      assert.equal(manifest.models[0]?.id, null);
+      assert.throws(() => assertArchitecture(manifest), /ARCH014|cannot form a canonical semantic ID/);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("returns a clean manifest unchanged", async () => {
     const fixture = await createAppFixture({ "src/features/health/index.ts": "export const healthy = true;" });
     try {

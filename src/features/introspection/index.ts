@@ -8,11 +8,19 @@ export {
   type FeatureSemantic,
   type ModelSemantic,
   type OperationSemantic,
+  type PackagePolicySemantic,
+  type PackageUseSemantic,
   type PublicApiSemantic,
   type RouteSemantic,
   type SemanticCategory,
   type SemanticChange,
 } from "./diff.js";
+export {
+  assertComparableManifestV2,
+  assertManifestV2,
+  ManifestCompatibilityError,
+  type ManifestCompatibilityErrorCode,
+} from "./manifest-compatibility.js";
 export {
   inspectApplication,
   inspectManifest,
@@ -20,10 +28,26 @@ export {
   type BoundaryProjection,
   type CallerProjection,
   type FeatureExplanation,
+  type IdentityProjection,
   type ImpactProjection,
+  type NamedIdentityProjection,
   type OwnerProjection,
+  type PublicApiProjection,
   type RouteExplanation,
+  type RouteSummaryProjection,
 } from "./inspector.js";
+export {
+  resolveSemanticSelector,
+  semanticDisplayName,
+  type AmbiguousSemanticSelector,
+  type ResolvedSemanticSelector,
+  type SemanticSelectorCandidate,
+  type SemanticSelectorCategory,
+  type SemanticSelectorFailure,
+  type SemanticSelectorNotFound,
+  type SemanticSelectorRecord,
+  type SemanticSelectorResult,
+} from "./selector.js";
 export {
   formatFeatureExplanation,
   formatRouteExplanation,

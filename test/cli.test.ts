@@ -8,10 +8,12 @@ import { afterEach, describe, it } from "node:test";
 import ts from "typescript";
 
 import { analyzeApplication } from "../src/features/architecture/index.js";
+import { ManifestCompatibilityError } from "../src/features/introspection/index.js";
 import { runCli, type CliDependencies, type CommandInvocation } from "../src/features/tooling/index.js";
 import {
   createApplication,
   createGitArchitectureDiff,
+  GitArchitectureDiffCompatibilityError,
   type ApplicationScaffoldFileSystem,
 } from "../src/infra/project/index.js";
 import { createAppFixture, type AppFixture } from "./helpers/app-fixture.js";
@@ -245,9 +247,15 @@ describe("app CLI architecture views", () => {
 
     const explain = await invoke(["explain", "billing", "--json"], app.root);
     assert.equal(explain.code, 0);
-    assert.deepEqual(JSON.parse(explain.stdout).actions, ["approveInvoice"]);
+    const explainJson = JSON.parse(explain.stdout);
+    assert.equal(explainJson.status, "resolved");
+    assert.deepEqual(explainJson.value.actions.map((entry: { displayName: string }) => entry.displayName), ["billing.approveInvoice"]);
+    assert.deepEqual(explainJson.value.actions.map((entry: { id: string }) => entry.id), ["sid1/operation/feature/billing/approveInvoice"]);
+    assert.equal(explainJson.value.id, "sid1/feature/feature/billing/billing");
     const route = await invoke(["explain", "/invoices", "--json"], app.root);
-    assert.equal(JSON.parse(route.stdout).permission, "invoice.read");
+    const routeJson = JSON.parse(route.stdout);
+    assert.equal(routeJson.status, "resolved");
+    assert.equal(routeJson.value.permission, "invoice.read");
     const graph = await invoke(["graph", "--dot"], app.root);
     assert.match(graph.stdout, /"reports" -> "billing"/);
 
@@ -263,15 +271,61 @@ describe("app CLI architecture views", () => {
       assert.equal(result.code, 0, `${args.join(" ")}: ${result.stderr}`);
       assert.doesNotThrow(() => JSON.parse(result.stdout));
     }
-    assert.deepEqual(JSON.parse((await invoke(["owners", "--json"], app.root)).stdout), [{ model: "Invoice", feature: "billing" }]);
-    assert.deepEqual(JSON.parse((await invoke(["impact", "approveInvoice", "--json"], app.root)).stdout), { symbol: "approveInvoice", owner: "billing", callers: ["reports"] });
+    const owners = JSON.parse((await invoke(["owners", "--json"], app.root)).stdout);
+    assert.equal(owners[0].id, "sid1/model/feature/billing/Invoice");
+    const impact = JSON.parse((await invoke(["impact", "approveInvoice", "--json"], app.root)).stdout);
+    assert.equal(impact.status, "resolved");
+    assert.equal(impact.value.id, "sid1/public-export/feature/billing/approveInvoice");
+    assert.deepEqual(impact.value.callers, ["reports"]);
   });
 
   it("returns a not-found error for an unknown explanation target", async () => {
     const app = await fixture({ "src/features/health/index.ts": "export const healthy = true;" });
     const result = await invoke(["explain", "missing"], app.root);
     assert.equal(result.code, 1);
-    assert.match(result.stderr, /No feature or route named missing/);
+    assert.match(result.stderr, /No feature or route matches selector missing/);
+    const jsonResult = await invoke(["explain", "missing", "--json"], app.root);
+    assert.equal(jsonResult.code, 1);
+    assert.deepEqual(JSON.parse(jsonResult.stdout), { status: "not-found", selector: "missing", candidates: [] });
+  });
+
+  it("reports sorted explain and impact ambiguity and accepts exact semantic IDs", async () => {
+    const app = await fixture({
+      "src/features/alpha/routes.ts": `import { route } from "typescript-on-rails"; export const sharedRoute = route({ method: "GET", path: "/same", public: true, handler: () => true });`,
+      "src/features/alpha/index.ts": `export const shared = true; export { sharedRoute } from "./routes.js";`,
+      "src/features/beta/routes.ts": `import { route } from "typescript-on-rails"; export const alpha = route({ method: "GET", path: "/same", public: true, handler: () => true }); export const sharedRoute = route({ method: "GET", path: "/other", public: true, handler: () => true });`,
+      "src/features/beta/index.ts": `export const shared = true; export { alpha, sharedRoute } from "./routes.js";`,
+    });
+
+    const cross = await invoke(["explain", "alpha", "--json"], app.root);
+    assert.equal(cross.code, 1);
+    const crossJson = JSON.parse(cross.stdout);
+    assert.equal(crossJson.status, "ambiguous");
+    assert.deepEqual(crossJson.candidates.map((entry: { id: string }) => entry.id), [
+      "sid1/feature/feature/alpha/alpha",
+      "sid1/route/feature/beta/alpha",
+    ]);
+    assert.match(cross.stderr, /Ambiguous feature or route selector alpha/);
+
+    const pathAmbiguity = await invoke(["explain", "/same", "--json"], app.root);
+    assert.equal(pathAmbiguity.code, 1);
+    assert.equal(JSON.parse(pathAmbiguity.stdout).status, "ambiguous");
+
+    const impactAmbiguity = await invoke(["impact", "shared", "--json"], app.root);
+    assert.equal(impactAmbiguity.code, 1);
+    assert.deepEqual(JSON.parse(impactAmbiguity.stdout).candidates.map((entry: { id: string }) => entry.id), [
+      "sid1/public-export/feature/alpha/shared",
+      "sid1/public-export/feature/beta/shared",
+    ]);
+
+    const exactExplain = await invoke(["explain", "sid1/route/feature/beta/alpha", "--json"], app.root);
+    assert.equal(exactExplain.code, 0, exactExplain.stderr);
+    assert.equal(JSON.parse(exactExplain.stdout).value.id, "sid1/route/feature/beta/alpha");
+    const exactText = await invoke(["explain", "sid1/route/feature/beta/alpha"], app.root);
+    assert.match(exactText.stdout, /^beta\.alpha\nSemantic ID: sid1\/route\/feature\/beta\/alpha\n/);
+    const exactImpact = await invoke(["impact", "sid1/public-export/feature/alpha/shared", "--json"], app.root);
+    assert.equal(exactImpact.code, 0, exactImpact.stderr);
+    assert.equal(JSON.parse(exactImpact.stdout).value.id, "sid1/public-export/feature/alpha/shared");
   });
 });
 
@@ -486,6 +540,56 @@ describe("app diff --architecture", () => {
       createGitArchitectureDiff(nonBlobRoot, "missing-ref"),
       /not a valid object name|Not a valid object name|fatal:/,
     );
+  });
+
+  it("rejects pre-v2, policy-invalid, and malformed injected analyses at the Git boundary", async () => {
+    const app = await fixture({
+      "src/features/billing/index.ts": "export const invoice = true;\n",
+    });
+    git(app.root, ["init", "-b", "main"]);
+    createBaseRef(app.root);
+
+    await assert.rejects(
+      createGitArchitectureDiff(app.root, "HEAD", (root) => root === app.root ? analyzeApplication(root) : { version: 1 }),
+      (error: unknown) => error instanceof GitArchitectureDiffCompatibilityError
+        && /earliest supported architecture-diff base/.test(error.message),
+    );
+    await assert.rejects(
+      createGitArchitectureDiff(app.root, "HEAD", (root) => {
+        const analysis = analyzeApplication(root);
+        return root === app.root ? analysis : {
+          ...analysis,
+          diagnostics: [{ code: "ARCH017", rule: "package-policy", severity: "error", message: "missing", file: "package.json", line: 1 }],
+        };
+      }),
+      (error: unknown) => error instanceof GitArchitectureDiffCompatibilityError
+        && /effective package policy/.test(error.message),
+    );
+    await assert.rejects(
+      createGitArchitectureDiff(app.root, "HEAD", (root) => root === app.root ? { version: 2 } : analyzeApplication(root)),
+      (error: unknown) => error instanceof ManifestCompatibilityError && error.code === "malformed-v2",
+    );
+    await assert.rejects(
+      createGitArchitectureDiff(app.root, "HEAD", (root) => {
+        const analysis = analyzeApplication(root);
+        return root === app.root ? {
+          ...analysis,
+          diagnostics: [{ code: "ARCH017", rule: "package-policy", severity: "error", message: "missing", file: "package.json", line: 1 }],
+        } : analysis;
+      }),
+      (error: unknown) => error instanceof GitArchitectureDiffCompatibilityError
+        && error.code === "invalid-working-tree-architecture"
+        && /working tree has no valid effective package policy/.test(error.message),
+    );
+
+    const ordinaryDiagnostic = await createGitArchitectureDiff(app.root, "HEAD", (root) => {
+      const analysis = analyzeApplication(root);
+      return root === app.root ? analysis : {
+        ...analysis,
+        diagnostics: [{ code: "ARCH001", rule: "feature-boundary", severity: "error", message: "ordinary", file: "src/index.ts", line: 1 }],
+      };
+    });
+    assert.equal(ordinaryDiagnostic.changed, false);
   });
 
   it("compares the working tree to HEAD through a read-only Git snapshot", async () => {

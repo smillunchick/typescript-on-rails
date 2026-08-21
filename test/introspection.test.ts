@@ -3,12 +3,16 @@ import { afterEach, describe, it } from "node:test";
 
 import {
   diffArchitecture,
+  encodeSemanticId,
   formatArchitectureDiff,
   graphAsDot,
   graphAsText,
   inspectApplication,
   inspectManifest,
+  ManifestCompatibilityError,
   type ArchitectureManifest,
+  type ManifestCompatibilityErrorCode,
+  type SemanticIdCategory,
 } from "../src/index.js";
 import { createAppFixture, type AppFixture } from "./helpers/app-fixture.js";
 
@@ -35,7 +39,6 @@ export const invoiceRoute = route({ method: "GET", path: "/invoices/:id", input:
   return inspectApplication(fixture.root);
 }
 
-const billingOwner = { kind: "feature", name: "billing" } as const;
 const resolvedStringSchema = {
   status: "resolved",
   provenance: "declared-schema",
@@ -52,10 +55,11 @@ const notDeclared = { status: "not-declared", validator: "not-declared" } as con
 const declaredSlot = { staticType: resolvedStatic, runtimeSchema: resolvedStringSchema } as const;
 const inferredSlot = { staticType: resolvedStatic, runtimeSchema: notDeclared } as const;
 
-function record(category: string, name: string, feature = "billing") {
+function record(category: SemanticIdCategory, name: string, feature = "billing") {
+  const owner = { kind: "feature", name: feature } as const;
   return {
-    id: `sid1/${category}/feature/${feature}/${name}`,
-    owner: { kind: "feature", name: feature } as const,
+    id: encodeSemanticId({ category, owner, localName: name }),
+    owner,
     name,
     feature,
   };
@@ -93,23 +97,31 @@ describe("application introspection", () => {
 
     assert.deepEqual(inspector.features().map((entry) => entry.name), ["billing", "reports"]);
     assert.deepEqual(inspector.actions().map((entry) => entry.name), ["approveInvoice"]);
-    assert.equal(inspector.findOwner("Invoice")?.feature, "billing");
-    assert.deepEqual(inspector.findCallers("approveInvoice"), [
+    const owner = inspector.findOwner("Invoice");
+    assert.equal(owner.status, "resolved");
+    if (owner.status === "resolved") assert.equal(owner.value.feature, "billing");
+    const callers = inspector.findCallers("approveInvoice");
+    assert.equal(callers.status, "resolved");
+    if (callers.status === "resolved") assert.deepEqual(callers.value.map(({ feature, owner, symbol }) => ({ feature, owner, symbol })), [
       { feature: "reports", owner: "billing", symbol: "approveInvoice" },
     ]);
-    assert.deepEqual(inspector.findCallers("Invoice"), []);
-    assert.deepEqual(inspector.explainRoute("/invoices/:id"), {
-      name: "invoiceRoute",
-      method: "GET",
-      path: "/invoices/:id",
-      feature: "billing",
-      permission: "invoice.read",
-    });
+    assert.equal(inspector.findCallers("missing").status, "not-found");
+    const route = inspector.explainRoute("/invoices/:id");
+    assert.equal(route.status, "resolved");
+    if (route.status === "resolved") {
+      assert.equal(route.value.id, "sid1/route/feature/billing/invoiceRoute");
+      assert.equal(route.value.displayName, "billing.invoiceRoute");
+      assert.equal(route.value.permission, "invoice.read");
+    }
     const feature = inspector.explainFeature("billing");
-    assert.equal(feature?.name, "billing");
-    assert.deepEqual(feature?.models, ["Invoice"]);
-    assert.deepEqual(feature?.actions, ["approveInvoice"]);
-    assert.deepEqual(feature?.dependents, ["reports"]);
+    assert.equal(feature.status, "resolved");
+    if (feature.status === "resolved") {
+      assert.equal(feature.value.name, "billing");
+      assert.deepEqual(feature.value.models.map((entry) => entry.displayName), ["billing.Invoice"]);
+      assert.deepEqual(feature.value.actions.map((entry) => entry.displayName), ["billing.approveInvoice"]);
+      assert.deepEqual(feature.value.dependents.map((entry) => entry.displayName), ["reports"]);
+      assert.deepEqual(feature.value.actions.map((entry) => entry.id), ["sid1/operation/feature/billing/approveInvoice"]);
+    }
   });
 
   it("limits callers to imported symbols and expands namespace imports", async () => {
@@ -125,10 +137,14 @@ describe("application introspection", () => {
       { from: "named", symbols: ["approveInvoice"] },
       { from: "namespace", symbols: ["*"] },
     ]);
-    assert.deepEqual(inspector.findCallers("Invoice"), [
+    const invoiceCallers = inspector.findCallers("Invoice");
+    assert.equal(invoiceCallers.status, "resolved");
+    if (invoiceCallers.status === "resolved") assert.deepEqual(invoiceCallers.value.map(({ feature, owner, symbol }) => ({ feature, owner, symbol })), [
       { feature: "namespace", owner: "billing", symbol: "Invoice" },
     ]);
-    assert.deepEqual(inspector.findCallers("approveInvoice"), [
+    const approveCallers = inspector.findCallers("approveInvoice");
+    assert.equal(approveCallers.status, "resolved");
+    if (approveCallers.status === "resolved") assert.deepEqual(approveCallers.value.map(({ feature, owner, symbol }) => ({ feature, owner, symbol })), [
       { feature: "named", owner: "billing", symbol: "approveInvoice" },
       { feature: "namespace", owner: "billing", symbol: "approveInvoice" },
     ]);
@@ -147,10 +163,73 @@ describe("application introspection", () => {
 
     assert.equal(graphAsText(source), "billing\nreports -> billing\n");
     assert.equal(graphAsDot(source), "digraph architecture {\n  \"billing\";\n  \"reports\";\n  \"reports\" -> \"billing\";\n}\n");
-    assert.deepEqual(inspector.owners(), [{ model: "Invoice", feature: "billing" }]);
-    assert.deepEqual(inspector.boundaries(), [{ feature: "billing", path: "src/features/billing/index.ts", exports: [{ name: "approveInvoice", kind: "value" }] }, { feature: "reports", path: "src/features/reports/index.ts", exports: [] }]);
+    assert.deepEqual(inspector.owners(), [{ id: "sid1/model/feature/billing/Invoice", displayName: "billing.Invoice", model: "Invoice", feature: "billing" }]);
+    assert.deepEqual(inspector.boundaries().map(({ id, displayName, exports }) => ({ id, displayName, exports })), [
+      { id: "sid1/feature/feature/billing/billing", displayName: "billing", exports: [{ id: "sid1/public-export/feature/billing/approveInvoice", displayName: "billing.approveInvoice", name: "approveInvoice", kind: "value" }] },
+      { id: "sid1/feature/feature/reports/reports", displayName: "reports", exports: [] },
+    ]);
     assert.equal(inspector.exceptions()[0]?.reason, "Migration");
-    assert.deepEqual(inspector.impact("approveInvoice"), { symbol: "approveInvoice", owner: "billing", callers: ["reports"] });
+    const impact = inspector.impact("approveInvoice");
+    assert.equal(impact.status, "resolved");
+    if (impact.status === "resolved") {
+      assert.equal(impact.value.id, "sid1/public-export/feature/billing/approveInvoice");
+      assert.deepEqual(impact.value.callers, ["reports"]);
+      assert.deepEqual(impact.value.callerIds, ["sid1/feature/feature/reports/reports"]);
+    }
+  });
+
+  it("resolves exact IDs and unique legacy aliases, and reports every ambiguous category with sorted IDs", () => {
+    const feature = (name: string, exports: ArchitectureManifest["features"][number]["exports"] = []) => ({
+      ...record("feature", name, name), publicBoundary: `${name}.ts`, exports, file: `${name}.ts`, line: 1,
+    });
+    const exportOf = (name: string, owner: string) => ({ ...record("public-export", name, owner), kind: "value", file: `${owner}.ts`, line: 1 });
+    const model = (name: string, owner: string) => ({ ...record("model", name, owner), fields: resolvedStringSchema, file: `${owner}.ts`, line: 1 });
+    const operation = (name: string, owner: string) => ({ ...record("operation", name, owner), kind: "action" as const, input: declaredSlot, output: inferredSlot, access: "public" as const, file: `${owner}.ts`, line: 1 });
+    const route = (name: string, owner: string, path: string) => ({ ...record("route", name, owner), method: "GET", path, input: declaredSlot, output: inferredSlot, access: "public" as const, file: `${owner}.ts`, line: 1 });
+    const event = (name: string, owner: string) => ({ ...record("event", name, owner), payload: resolvedStringSchema, file: `${owner}.ts`, line: 1 });
+    const contract = (name: string, owner: string) => ({ ...record("adapter-contract", name, owner), kind: "contract" as const, operations: { status: "resolved" as const, operations: {} }, file: `${owner}.ts`, line: 1 });
+    const implementation = (name: string, owner: string) => ({ ...record("adapter-implementation", name, owner), kind: "implementation" as const, contractId: null, file: `${owner}.ts`, line: 1 });
+    const source = manifest({
+      features: [
+        feature("alpha", [exportOf("sharedExport", "alpha")]),
+        feature("beta", [exportOf("sharedExport", "beta")]),
+        feature("shared"),
+      ],
+      models: [model("sharedModel", "alpha"), model("sharedModel", "beta"), model("uniqueModel", "alpha")],
+      operations: [operation("sharedOperation", "alpha"), operation("sharedOperation", "beta")],
+      routes: [route("shared", "alpha", "/same"), route("shared", "beta", "/same")],
+      events: [event("sharedEvent", "alpha"), event("sharedEvent", "beta")],
+      adapters: [contract("sharedContract", "alpha"), contract("sharedContract", "beta"), implementation("sharedImplementation", "alpha"), implementation("sharedImplementation", "beta")],
+    });
+    const inspector = inspectManifest(source);
+
+    const unique = inspector.findOwner("uniqueModel");
+    assert.equal(unique.status, "resolved");
+    assert.equal(inspector.findOwner("sid1/model/feature/alpha/uniqueModel").status, "resolved");
+    assert.equal(inspector.resolve("sid1/model/feature/missing/uniqueModel", ["model"]).status, "not-found");
+
+    const ambiguous: Array<[string, Parameters<typeof inspector.resolve>[1]]> = [
+      ["sharedOperation", ["operation"]], ["sharedModel", ["model"]], ["sharedExport", ["public-export"]],
+      ["sharedEvent", ["event"]], ["sharedContract", ["adapter-contract"]],
+      ["sharedImplementation", ["adapter-implementation"]], ["shared", ["route"]], ["/same", ["route"]],
+    ];
+    for (const [selector, categories] of ambiguous) {
+      const result = inspector.resolve(selector, categories);
+      assert.equal(result.status, "ambiguous", selector);
+      if (result.status === "ambiguous") {
+        assert.deepEqual(result.candidates.map((entry) => entry.id), [...result.candidates.map((entry) => entry.id)].sort());
+        assert.equal(result.candidates.length, 2);
+      }
+    }
+    const crossCategory = inspector.resolve("shared", ["feature", "route"]);
+    assert.equal(crossCategory.status, "ambiguous");
+    if (crossCategory.status === "ambiguous") assert.equal(crossCategory.candidates.length, 3);
+    assert.equal(inspector.explainRoute("sid1/route/feature/alpha/shared").status, "resolved");
+  });
+
+  it("validates manifest v2 before constructing an inspector", () => {
+    assert.throws(() => inspectManifest({ ...manifest(), models: [{ ...manifest().models[0]!, id: null }] }), ManifestCompatibilityError);
+    assert.throws(() => inspectManifest({ ...manifest(), operations: [manifest().operations[0]!, manifest().operations[0]!] }), ManifestCompatibilityError);
   });
 });
 
@@ -172,6 +251,10 @@ describe("semantic architecture diff", () => {
   it("reports semantic additions, removals, and changes", () => {
     const before = manifest();
     const after = manifest({
+      features: [
+        ...before.features,
+        { ...record("feature", "accounts", "accounts"), publicBoundary: "accounts.ts", exports: [], file: "accounts.ts", line: 1 },
+      ],
       models: [{ ...record("model", "Invoice", "accounts"), fields: resolvedStringSchema, file: "x.ts", line: 1 }],
       routes: [{ ...record("route", "invoiceRoute"), method: "POST", path: "/invoices", input: declaredSlot, output: inferredSlot, access: "permission", permission: "invoice.create", file: "x.ts", line: 2 }],
       permissions: ["invoice.create"],
@@ -186,7 +269,7 @@ describe("semantic architecture diff", () => {
     assert.deepEqual(diff.permissions.removed, ["invoice.approve", "invoice.read"]);
     assert.equal(diff.routes.changed.length, 1);
     assert.deepEqual(diff.events.added.map((entry) => entry.name), ["InvoiceCreated"]);
-    assert.match(formatArchitectureDiff(diff), /Model added: Invoice/);
+    assert.match(formatArchitectureDiff(diff), /Model added: accounts\.Invoice/);
   });
 
   it("reports static contract-shape and access changes", () => {
@@ -208,6 +291,88 @@ describe("semantic architecture diff", () => {
     assert.equal(diff.operations.changed.length, 1);
     assert.equal(diff.events.changed.length, 1);
     assert.equal(diff.adapters.changed.length, 1);
-    assert.match(formatArchitectureDiff(diff), /Operation changed: approveInvoice/);
+    assert.match(formatArchitectureDiff(diff), /Operation changed: billing\.approveInvoice/);
+  });
+
+  it("keys same-named operations by owner ID and detects validator-only contract changes", () => {
+    const reportOperation = {
+      ...manifest().operations[0]!,
+      ...record("operation", "approveInvoice", "reports"),
+      file: "reports.ts",
+      output: declaredSlot,
+    };
+    const before = manifest({
+      features: [
+        ...manifest().features,
+        { ...record("feature", "reports", "reports"), publicBoundary: "reports.ts", exports: [], file: "reports.ts", line: 1 },
+      ],
+      operations: [{ ...manifest().operations[0]!, output: declaredSlot }, reportOperation],
+    });
+    const after = manifest({
+      features: before.features,
+      operations: [before.operations[0]!, { ...reportOperation, output: inferredSlot, file: "moved-reports.ts", line: 99 }],
+    });
+
+    const diff = diffArchitecture(before, after);
+    assert.deepEqual(diff.operations.changed.map((entry) => entry.after.id), [
+      "sid1/operation/feature/reports/approveInvoice",
+    ]);
+    assert.match(formatArchitectureDiff(diff), /Operation changed: reports\.approveInvoice/);
+  });
+
+  it("diffs package policy and collapsed package uses without source-location noise", () => {
+    const before = manifest({
+      features: [
+        ...manifest().features,
+        { ...record("feature", "reports", "reports"), publicBoundary: "reports.ts", exports: [], file: "reports.ts", line: 1 },
+      ],
+      packagePolicy: [{ package: "date-lib", capability: "pure" }],
+      packageUses: [
+        { package: "date-lib", capability: "pure", file: "one.ts", line: 1 },
+        { package: "date-lib", capability: "pure", file: "two.ts", line: 2 },
+      ],
+      dependencies: [{ from: "reports", to: "billing", symbols: ["z", "a"], file: "one.ts", line: 1 }],
+    });
+    const moved = manifest({
+      ...before,
+      packageUses: [{ package: "date-lib", capability: "pure", file: "moved.ts", line: 80 }],
+      dependencies: [{ from: "reports", to: "billing", symbols: ["a", "z"], file: "moved.ts", line: 80 }],
+    });
+    assert.equal(diffArchitecture(before, moved).changed, false);
+
+    const after = manifest({
+      ...moved,
+      packagePolicy: [{ package: "date-lib", capability: "external-system" }],
+      packageUses: [{ package: "date-lib", capability: "external-system", file: "moved.ts", line: 80 }],
+    });
+    const diff = diffArchitecture(before, after);
+    assert.equal(diff.packagePolicy.changed.length, 1);
+    assert.equal(diff.packageUses.changed.length, 1);
+    assert.match(formatArchitectureDiff(diff), /Package policy changed: date-lib \(external-system\)/);
+  });
+
+  it("rejects v1, mixed, malformed, null-ID, and duplicate-ID runtime inputs with typed guidance", () => {
+    const invalidInputs: Array<{ readonly value: unknown; readonly code: ManifestCompatibilityErrorCode }> = [
+      { value: { version: 1 }, code: "mixed-version" },
+      { value: { ...manifest(), compiler: { ...manifest().compiler, manifestVersion: 1 } }, code: "mixed-version" },
+      { value: { ...manifest(), compiler: { typescriptVersion: "5.9.3", schemaProtocolVersion: "1", canonicalSchemaVersion: "1", typeContractVersion: 1 } }, code: "malformed-v2" },
+      { value: { ...manifest(), features: null }, code: "malformed-v2" },
+      { value: { ...manifest(), diagnostics: [null] }, code: "malformed-v2" },
+      { value: { ...manifest(), models: [{ ...manifest().models[0]!, id: null }] }, code: "null-semantic-id" },
+      { value: { ...manifest(), operations: [manifest().operations[0]!, { ...manifest().operations[0]!, file: "duplicate.ts", line: 9 }] }, code: "duplicate-semantic-id" },
+    ];
+
+    for (const { value, code } of invalidInputs) {
+      assert.throws(
+        () => diffArchitecture(value, manifest()),
+        (error: unknown) => error instanceof ManifestCompatibilityError
+          && error.code === code
+          && /Regenerate the architecture manifest from source/.test(error.message),
+      );
+    }
+    assert.throws(
+      () => diffArchitecture({ version: 1 }, { version: 1 }),
+      (error: unknown) => error instanceof ManifestCompatibilityError && error.code === "persisted-v1",
+    );
   });
 });

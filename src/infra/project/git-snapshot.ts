@@ -6,16 +6,74 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { finished } from "node:stream/promises";
 
+import { PACKAGE_POLICY_RULE } from "./package-policy.js";
 import {
   analyzeApplication,
   type ArchitectureManifest,
 } from "../../features/architecture/index.js";
 import {
+  assertComparableManifestV2,
   diffArchitecture,
+  ManifestCompatibilityError,
   type ArchitectureDiff,
 } from "../../features/introspection/index.js";
 
-export type AnalyzeForDiff = (root: string) => ArchitectureManifest;
+export type AnalyzeForDiff = (root: string) => unknown;
+
+const EARLIEST_SUPPORTED_BASE = "Choose the manifest v2 migration commit, or a later commit with effective package policy, as the earliest supported architecture-diff base.";
+
+export type GitArchitectureDiffCompatibilityErrorCode =
+  | "unsupported-architecture-diff-base"
+  | "invalid-working-tree-architecture";
+
+export class GitArchitectureDiffCompatibilityError extends Error {
+  readonly name = "GitArchitectureDiffCompatibilityError";
+
+  constructor(
+    message: string,
+    readonly code: GitArchitectureDiffCompatibilityErrorCode,
+    readonly cause?: unknown,
+  ) {
+    super(code === "unsupported-architecture-diff-base" ? `${message} ${EARLIEST_SUPPORTED_BASE}` : message);
+  }
+}
+
+function hasPackagePolicyError(manifest: ArchitectureManifest): boolean {
+  return manifest.diagnostics.some((entry) => (
+    entry.severity === "error" && entry.rule === PACKAGE_POLICY_RULE
+  ));
+}
+
+function assertSupportedBase(value: unknown): asserts value is ArchitectureManifest {
+  try {
+    assertComparableManifestV2(value);
+  } catch (error) {
+    if (error instanceof ManifestCompatibilityError) {
+      throw new GitArchitectureDiffCompatibilityError(
+        "The Git base is not a compatible manifest v2 architecture snapshot.",
+        "unsupported-architecture-diff-base",
+        error,
+      );
+    }
+    throw error;
+  }
+  if (hasPackagePolicyError(value)) {
+    throw new GitArchitectureDiffCompatibilityError(
+      "The Git base has no valid effective package policy and predates the supported migration boundary.",
+      "unsupported-architecture-diff-base",
+    );
+  }
+}
+
+function assertSupportedWorkingTree(value: unknown): asserts value is ArchitectureManifest {
+  assertComparableManifestV2(value);
+  if (hasPackagePolicyError(value)) {
+    throw new GitArchitectureDiffCompatibilityError(
+      "The working tree has no valid effective package policy. Configure typescriptOnRails.packageCapabilities before comparing architecture.",
+      "invalid-working-tree-architecture",
+    );
+  }
+}
 
 const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/~^-]*$/;
 
@@ -253,6 +311,8 @@ export async function createGitArchitectureDiff(
     await linkNodeModules(root, snapshot);
     const before = analyze(snapshot);
     const after = analyze(root);
+    assertSupportedBase(before);
+    assertSupportedWorkingTree(after);
     return diffArchitecture(before, after);
   } finally {
     await rm(snapshot, { recursive: true, force: true });

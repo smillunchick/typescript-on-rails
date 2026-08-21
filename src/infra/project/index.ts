@@ -1,4 +1,10 @@
-export { createGitArchitectureDiff, validateGitRef, type AnalyzeForDiff } from "./git-snapshot.js";
+export {
+  createGitArchitectureDiff,
+  GitArchitectureDiffCompatibilityError,
+  validateGitRef,
+  type AnalyzeForDiff,
+  type GitArchitectureDiffCompatibilityErrorCode,
+} from "./git-snapshot.js";
 export {
   createAction,
   createApplication,

@@ -8,6 +8,7 @@ import {
   SCHEMA_PROTOCOL_VERSION,
 } from "../../features/runtime/index.js";
 import {
+  PACKAGE_POLICY_RULE,
   runtimePackageIdentity,
   selectPackagePolicy,
   type PackagePolicyEntry,
@@ -75,7 +76,7 @@ const RULE_CODES: Readonly<Record<string, string>> = {
   "semantic-identity": "ARCH014",
   "adapter-link": "ARCH015",
   "contract-extraction": "ARCH016",
-  "package-policy": "ARCH017",
+  [PACKAGE_POLICY_RULE]: "ARCH017",
   "source-role": "ARCH018",
   "dynamic-import": "ARCH019",
 };
@@ -1475,7 +1476,7 @@ export function analyzeTypeContractsWithTypescript(
 
   for (const issue of selectedPolicy.issues) {
     output.diagnostics.push(diagnostic(
-      "package-policy",
+      PACKAGE_POLICY_RULE,
       issue.message,
       "package.json",
       1,

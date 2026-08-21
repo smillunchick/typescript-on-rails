@@ -4,6 +4,7 @@ import {
   type ArchitectureManifest,
 } from "../architecture/index.js";
 import {
+  assertManifestV2,
   formatArchitectureDiff,
   formatFeatureExplanation,
   formatRouteExplanation,
@@ -12,6 +13,7 @@ import {
   inspectApplication,
   type ApplicationInspector,
   type ArchitectureDiff,
+  type SemanticSelectorFailure,
 } from "../introspection/index.js";
 import {
   createAction,
@@ -123,6 +125,7 @@ async function runCheck(
   const asJson = oneFlag(args, "--json");
   const withTests = oneFlag(args, "--with-tests");
   const manifest = analyze(cwd);
+  assertManifestV2(manifest);
   const errors = manifest.diagnostics.filter((entry) => entry.severity === "error");
   for (const entry of manifest.diagnostics) stderr.write(`${formatArchitectureDiagnostic(entry)}\n`);
   if (errors.length > 0) {
@@ -172,21 +175,44 @@ async function runCreate(args: readonly string[], cwd: string, stdout: CliStream
   return 0;
 }
 
+function formatSelectorFailure(noun: string, result: SemanticSelectorFailure): string {
+  if (result.status === "not-found") return `No ${noun} matches selector ${result.selector}.\n`;
+  return [
+    `Ambiguous ${noun} selector ${result.selector}. Candidate semantic IDs:`,
+    ...result.candidates.map((candidate) => `  ${candidate.id} (${candidate.category}, ${candidate.displayName})`),
+  ].join("\n") + "\n";
+}
+
 function runExplain(args: readonly string[], inspector: ApplicationInspector, stdout: CliStream, stderr: CliStream): number {
   const target = args[0];
   if (target === undefined) throw new CliUsageError("Expected a feature or route");
   onlyFlags(args.slice(1), ["--json"]);
   const asJson = oneFlag(args.slice(1), "--json");
-  const route = inspector.explainRoute(target);
-  const feature = inspector.explainFeature(target);
-  const explanation = route ?? feature;
-  if (explanation === null) {
-    stderr.write(`No feature or route named ${target}.\n`);
+  const selected = inspector.resolve(target, ["feature", "route"]);
+  if (selected.status !== "resolved") {
+    stderr.write(formatSelectorFailure("feature or route", selected));
+    if (asJson) json(stdout, selected);
+    return 1;
+  }
+  if (selected.candidate.category === "route") {
+    const explanation = inspector.explainRoute(selected.candidate.id);
+    if (explanation.status !== "resolved") {
+      stderr.write(formatSelectorFailure("feature or route", explanation));
+      if (asJson) json(stdout, explanation);
+      return 1;
+    }
+    if (asJson) json(stdout, explanation);
+    else stdout.write(formatRouteExplanation(explanation.value));
+    return 0;
+  }
+  const explanation = inspector.explainFeature(selected.candidate.id);
+  if (explanation.status !== "resolved") {
+    stderr.write(formatSelectorFailure("feature or route", explanation));
+    if (asJson) json(stdout, explanation);
     return 1;
   }
   if (asJson) json(stdout, explanation);
-  else if (route !== null) stdout.write(formatRouteExplanation(route));
-  else if (feature !== null) stdout.write(formatFeatureExplanation(feature));
+  else stdout.write(formatFeatureExplanation(explanation.value));
   return 0;
 }
 
@@ -195,7 +221,7 @@ function runGraph(args: readonly string[], inspector: ApplicationInspector, stdo
   const asJson = oneFlag(args, "--json");
   const asDot = oneFlag(args, "--dot");
   if (asJson && asDot) throw new CliUsageError("Choose either --json or --dot");
-  if (asJson) json(stdout, { features: inspector.features().map((entry) => entry.name), dependencies: inspector.dependencies() });
+  if (asJson) json(stdout, { features: inspector.features().map((entry) => ({ id: entry.id, displayName: entry.name, name: entry.name })), dependencies: inspector.dependencies() });
   else stdout.write(asDot ? graphAsDot(inspector.manifest) : graphAsText(inspector.manifest));
   return 0;
 }
@@ -217,13 +243,25 @@ function runProjection(
   return 0;
 }
 
-function runImpact(args: readonly string[], inspector: ApplicationInspector, stdout: CliStream): number {
+function runImpact(args: readonly string[], inspector: ApplicationInspector, stdout: CliStream, stderr: CliStream): number {
   const symbol = args[0];
   if (symbol === undefined) throw new CliUsageError("Expected a public symbol");
   onlyFlags(args.slice(1), ["--json"]);
+  const asJson = oneFlag(args.slice(1), "--json");
   const impact = inspector.impact(symbol);
-  if (oneFlag(args.slice(1), "--json")) json(stdout, impact);
-  else stdout.write(`${symbol}\nOwner: ${impact.owner ?? "none"}\nCallers: ${impact.callers.length === 0 ? "none" : impact.callers.join(", ")}\n`);
+  if (impact.status !== "resolved") {
+    stderr.write(formatSelectorFailure("public export", impact));
+    if (asJson) json(stdout, impact);
+    return 1;
+  }
+  if (asJson) json(stdout, impact);
+  else {
+    const callers = impact.value.callers.map((caller, index) => {
+      const callerId = impact.value.callerIds[index];
+      return callerId === undefined ? caller : `${caller} [${callerId}]`;
+    });
+    stdout.write(`${impact.value.displayName}\nSemantic ID: ${impact.value.id}\nOwner: ${impact.value.owner} [${impact.value.ownerId}]\nCallers: ${callers.length === 0 ? "none" : callers.join(", ")}\n`);
+  }
   return 0;
 }
 
@@ -295,7 +333,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
     if (command === "owners" || command === "boundaries" || command === "exceptions") {
       return runProjection(command, rest, inspect(cwd), stdout);
     }
-    if (command === "impact") return runImpact(rest, inspect(cwd), stdout);
+    if (command === "impact") return runImpact(rest, inspect(cwd), stdout, stderr);
     if (command === "diff") {
       const parsed = parseDiff(rest);
       const diff = await architectureDiff(cwd, parsed.base);
