@@ -90,7 +90,7 @@ describe("reference SaaS billing promises", () => {
     });
   });
 
-  it("uses real query, report, UI, event, and payment boundaries", async () => {
+  it("uses query, report, view-model, event, and payment boundaries", async () => {
     const invoices = await listInvoices.execute({}, context);
     assert.deepEqual(await getRevenueReport.execute({}, context), {
       invoiceCount: 1,
@@ -98,7 +98,11 @@ describe("reference SaaS billing promises", () => {
     });
     const firstInvoice = invoices[0];
     assert.ok(firstInvoice);
-    assert.equal(invoicePage(firstInvoice).total, "125.00");
+    assert.deepEqual(invoicePage(firstInvoice), {
+      title: "Invoice invoice_1",
+      status: "issued",
+      total: "125.00",
+    });
     const bus = createEventBus();
     const paid: string[] = [];
     bus.on(InvoicePaid, ({ invoiceId }) => {
