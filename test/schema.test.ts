@@ -174,6 +174,29 @@ describe("schemas", () => {
     assert.equal(adapted[SCHEMA_PROTOCOL_MARKER].canonicalVersion, CANONICAL_SCHEMA_VERSION);
   });
 
+  it("keeps framework-created protocol descriptors immutable", () => {
+    const builtIn = string();
+    const adapted = adaptSchema({
+      metadata: { kind: "string" } as const,
+      parse: (value: unknown) => ({ success: true as const, value: String(value) }),
+      mapError: () => [{ code: "invalid_value" as const }],
+    });
+    const legacy = normalizeSchema({
+      metadata: { kind: "string" } as const,
+      parse: (value: unknown) => String(value),
+    });
+    const hostileError = new InvalidInput("secret", [], { details: { token: "secret" } });
+
+    for (const candidate of [builtIn, adapted, legacy]) {
+      const descriptor = candidate[SCHEMA_PROTOCOL_MARKER];
+      const originalParse = descriptor.parse;
+      assert.equal(Object.isFrozen(descriptor), true);
+      assert.equal(Reflect.set(descriptor, "parse", () => { throw hostileError; }), false);
+      assert.equal(descriptor.parse, originalParse);
+      assert.equal(candidate.parse("value"), "value");
+    }
+  });
+
   it("sanitizes adapted failures and keeps raw parser throws internal", () => {
     const vendorFailure = {
       message: "secret-token vendor message",
@@ -220,6 +243,167 @@ describe("schemas", () => {
       assert.equal(error.cause, vendorFailure);
       return true;
     });
+  });
+
+  it("sanitizes failures from untrusted marked protocols", () => {
+    const marked = normalizeSchema({
+      metadata: { kind: "string" },
+      parse: () => "outer parser must not run",
+      [SCHEMA_PROTOCOL_MARKER]: {
+        protocolVersion: SCHEMA_PROTOCOL_VERSION,
+        canonicalVersion: CANONICAL_SCHEMA_VERSION,
+        metadata: { kind: "string" },
+        parse: () => ({
+          success: false,
+          error: {
+            message: "secret vendor message",
+            issues: [{
+              path: ["profile", "name"],
+              code: "invalid_type",
+              message: "secret issue",
+              expected: "secret expected",
+              received: "secret received",
+              raw: { token: "secret-token" },
+            }],
+          },
+        }),
+      },
+    } as never);
+
+    for (const candidate of [marked, normalizeSchema(marked)]) {
+      assert.throws(() => candidate.parse(42), (error: unknown) => {
+        assert.ok(error instanceof InvalidInput);
+        assert.equal(error.message, "Invalid input");
+        assert.deepEqual(error.issues, [{
+          path: ["profile", "name"],
+          code: "invalid_type",
+          message: "Invalid type",
+        }]);
+        assert.doesNotMatch(
+          JSON.stringify({ message: error.message, details: error.details }),
+          /secret|vendor|token|expected|received|raw/,
+        );
+        return true;
+      });
+    }
+
+    const thrownError = new InvalidInput(
+      "secret thrown message",
+      [{ path: [], message: "secret thrown issue" }],
+      { details: { token: "secret-thrown-token" } },
+    );
+    const throwing = normalizeSchema({
+      metadata: { kind: "string" },
+      parse: () => "outer parser must not run",
+      [SCHEMA_PROTOCOL_MARKER]: {
+        protocolVersion: SCHEMA_PROTOCOL_VERSION,
+        canonicalVersion: CANONICAL_SCHEMA_VERSION,
+        metadata: { kind: "string" },
+        parse: () => { throw thrownError; },
+      },
+    } as never);
+    assert.throws(() => throwing.parse("value"), (error: unknown) => {
+      assert.ok(error instanceof Unexpected);
+      assert.equal(error.message, "Unexpected framework error");
+      assert.equal(error.details, undefined);
+      assert.equal(error.cause, thrownError);
+      assert.doesNotMatch(JSON.stringify({ message: error.message, details: error.details }), /secret|token/);
+      return true;
+    });
+
+    const accessorIssue: Record<string, unknown> = { path: [] };
+    Object.defineProperty(accessorIssue, "code", {
+      enumerable: true,
+      get() { throw thrownError; },
+    });
+    const hostileAccessor = normalizeSchema({
+      metadata: { kind: "string" },
+      parse: () => "outer parser must not run",
+      [SCHEMA_PROTOCOL_MARKER]: {
+        protocolVersion: SCHEMA_PROTOCOL_VERSION,
+        canonicalVersion: CANONICAL_SCHEMA_VERSION,
+        metadata: { kind: "string" },
+        parse: () => ({
+          success: false,
+          error: { message: "secret", issues: [accessorIssue] },
+        }),
+      },
+    } as never);
+    assert.throws(() => hostileAccessor.parse("value"), (error: unknown) => {
+      assert.ok(error instanceof Unexpected);
+      assert.equal(error.message, "Unexpected framework error");
+      assert.equal(error.details, undefined);
+      assert.equal(error.cause, thrownError);
+      return true;
+    });
+
+    let issueMapCalls = 0;
+    let pathMethodCalls = 0;
+    const hostilePath = ["profile", "name"];
+    Object.defineProperty(hostilePath, "some", {
+      value: () => {
+        pathMethodCalls += 1;
+        return false;
+      },
+    });
+    Object.defineProperty(hostilePath, Symbol.iterator, {
+      value: function* () {
+        pathMethodCalls += 1;
+        yield thrownError;
+      },
+    });
+    const hostileIssues: unknown[] = [{
+      path: hostilePath,
+      code: "invalid_type",
+      message: "secret issue",
+    }];
+    Object.defineProperty(hostileIssues, "map", {
+      value: () => {
+        issueMapCalls += 1;
+        return [thrownError];
+      },
+    });
+    const hostileArrayMethods = normalizeSchema({
+      metadata: { kind: "string" },
+      parse: () => "outer parser must not run",
+      [SCHEMA_PROTOCOL_MARKER]: {
+        protocolVersion: SCHEMA_PROTOCOL_VERSION,
+        canonicalVersion: CANONICAL_SCHEMA_VERSION,
+        metadata: { kind: "string" },
+        parse: () => ({
+          success: false,
+          error: { message: "secret failure", issues: hostileIssues },
+        }),
+      },
+    } as never);
+    assert.throws(() => hostileArrayMethods.parse("value"), (error: unknown) => {
+      assert.ok(error instanceof InvalidInput);
+      assert.equal(error.message, "Invalid input");
+      assert.deepEqual(error.issues, [{
+        path: ["profile", "name"],
+        code: "invalid_type",
+        message: "Invalid type",
+      }]);
+      assert.doesNotMatch(JSON.stringify({ message: error.message, details: error.details }), /secret/);
+      return true;
+    });
+    assert.equal(issueMapCalls, 0);
+    assert.equal(pathMethodCalls, 0);
+
+    const malformed = normalizeSchema({
+      metadata: { kind: "string" },
+      parse: () => "outer parser must not run",
+      [SCHEMA_PROTOCOL_MARKER]: {
+        protocolVersion: SCHEMA_PROTOCOL_VERSION,
+        canonicalVersion: CANONICAL_SCHEMA_VERSION,
+        metadata: { kind: "string" },
+        parse: () => ({
+          success: false,
+          error: { message: "secret", issues: [{ path: [{}], message: "secret" }] },
+        }),
+      },
+    } as never);
+    assert.throws(() => malformed.parse("value"), Unexpected);
   });
 
   it("wraps secret-bearing framework errors thrown by vendor callbacks", () => {
@@ -282,11 +466,33 @@ describe("schemas", () => {
       parse: () => ({ success: false as const, error: "secret vendor failure" }),
       mapError: (() => [{ code: "secret-vendor-code", message: "secret vendor message" }]) as never,
     });
+    const coercibleCode = adaptSchema({
+      metadata: { kind: "string" } as const,
+      parse: () => ({ success: false as const, error: "secret vendor failure" }),
+      mapError: (() => [{
+        code: { toString: () => "invalid_type", secret: "secret-token" },
+      }]) as never,
+    });
+    let codeReads = 0;
+    const changingIssue: Record<string, unknown> = {};
+    Object.defineProperty(changingIssue, "code", {
+      enumerable: true,
+      get() {
+        codeReads += 1;
+        return codeReads === 1 ? "invalid_type" : "secret-vendor-code";
+      },
+    });
+    const changingCode = adaptSchema({
+      metadata: { kind: "string" } as const,
+      parse: () => ({ success: false as const, error: "secret vendor failure" }),
+      mapError: (() => [changingIssue]) as never,
+    });
 
     for (const parse of [
       () => invalidResult.parse("value"),
       () => mapperThenable.parse("value"),
       () => malformedIssue.parse("value"),
+      () => coercibleCode.parse("value"),
     ]) {
       assert.throws(parse, (error: unknown) => {
         assert.ok(error instanceof Unexpected);
@@ -299,6 +505,17 @@ describe("schemas", () => {
         return true;
       });
     }
+    assert.throws(() => changingCode.parse("value"), (error: unknown) => {
+      assert.ok(error instanceof InvalidInput);
+      assert.deepEqual(error.issues, [{
+        path: [],
+        code: "invalid_type",
+        message: "Invalid type",
+      }]);
+      assert.doesNotMatch(JSON.stringify({ message: error.message, details: error.details }), /secret|vendor/);
+      return true;
+    });
+    assert.equal(codeReads, 1);
   });
 
   it("retains own __proto__ keys without changing accumulator prototypes", () => {

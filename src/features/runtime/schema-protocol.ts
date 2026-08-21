@@ -16,6 +16,8 @@ export const SCHEMA_PROTOCOL_MARKER = "typescript-on-rails.schema" as const;
 export const SCHEMA_PROTOCOL_VERSION = "1" as const;
 export const CANONICAL_SCHEMA_VERSION = "1" as const;
 
+const descriptorFailureTrust = new WeakMap<object, boolean>();
+
 export type LiteralValue = string | number | boolean | null;
 export type CanonicalJsonValue =
   | LiteralValue
@@ -120,6 +122,17 @@ export function setOwn<TValue>(target: Record<string, TValue>, key: string, valu
   });
 }
 
+function snapshotArray(value: unknown): readonly unknown[] {
+  if (!Array.isArray(value)) throw new TypeError("Expected an array");
+  const length: unknown = value.length;
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+    throw new TypeError("Expected a valid array length");
+  }
+  const snapshot = new Array<unknown>(length);
+  for (let index = 0; index < length; index += 1) snapshot[index] = value[index];
+  return snapshot;
+}
+
 function hasOnlyKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
   const allowed = new Set([...required, ...optional]);
   return required.every((key) => Object.hasOwn(value, key)) && ownKeys(value).every((key) => allowed.has(key));
@@ -157,7 +170,12 @@ function canonicalJson(
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      return value.map((entry, index) => canonicalJson(entry, [...path, index], ancestors));
+      const entries = snapshotArray(value);
+      const normalized = new Array<CanonicalJsonValue>(entries.length);
+      for (let index = 0; index < entries.length; index += 1) {
+        normalized[index] = canonicalJson(entries[index], [...path, index], ancestors);
+      }
+      return normalized;
     }
     if (!isPlainRecord(value)) throw declarationError(path, "Expected a canonical JSON object");
     const output: Record<string, CanonicalJsonValue> = {};
@@ -204,16 +222,19 @@ function canonicalMetadata(
         }
         return { kind: "money", currency: "minor-unit" };
       case "enum": {
-        if (!hasOnlyKeys(value, ["kind", "values"]) || !Array.isArray(value["values"]) || value["values"].length === 0) {
+        if (!hasOnlyKeys(value, ["kind", "values"]) || !Array.isArray(value["values"])) {
           invalidNode([...path, "values"], "Expected one or more enum values");
         }
-        const values = value["values"].map((entry, index) => {
-          const normalized = canonicalJson(entry, [...path, "values", index], new Set());
+        const entries = snapshotArray(value["values"]);
+        if (entries.length === 0) invalidNode([...path, "values"], "Expected one or more enum values");
+        const values = new Array<LiteralValue>(entries.length);
+        for (let index = 0; index < entries.length; index += 1) {
+          const normalized = canonicalJson(entries[index], [...path, "values", index], new Set());
           if (normalized !== null && typeof normalized === "object") {
             invalidNode([...path, "values", index], "Expected a literal enum value");
           }
-          return normalized;
-        });
+          values[index] = normalized;
+        }
         return { kind: "enum", values };
       }
       case "literal": {
@@ -265,50 +286,85 @@ function isThenable(value: unknown): boolean {
     : false;
 }
 
+type InspectedProtocolResult<TValue> =
+  | { readonly success: true; readonly value: TValue }
+  | { readonly success: false; readonly message: string; readonly issues: readonly unknown[] };
+
+function inspectProtocolResult<TValue>(result: unknown): InspectedProtocolResult<TValue> {
+  if (isThenable(result)) throw new TypeError("Schema parser returned a thenable");
+  if (!isRecord(result) || typeof result["success"] !== "boolean") {
+    throw new TypeError("Schema parser returned an invalid result");
+  }
+  if (result["success"] === true) {
+    if (!Object.hasOwn(result, "value")) throw new TypeError("Schema parser success omitted its value");
+    const parsed = result["value"] as TValue;
+    if (isThenable(parsed)) throw new TypeError("Schema parser returned a thenable value");
+    return { success: true, value: parsed };
+  }
+  const failure = result["error"];
+  if (!isRecord(failure) || typeof failure["message"] !== "string" || !Array.isArray(failure["issues"])) {
+    throw new TypeError("Schema parser returned an invalid failure");
+  }
+  return { success: false, message: failure["message"], issues: failure["issues"] };
+}
+
 function parseProtocolResult<TValue>(
   descriptor: SchemaProtocolDescriptor<TValue>,
   value: unknown,
   path: readonly ValidationPathSegment[],
+  trustFailureDetails: boolean,
 ): TValue {
+  let result: unknown;
   try {
-    const result: unknown = descriptor.parse(value, path);
-    if (isThenable(result)) throw new Unexpected(undefined, { cause: new TypeError("Schema parser returned a thenable") });
-    if (!isRecord(result) || typeof result["success"] !== "boolean") {
-      throw new TypeError("Schema parser returned an invalid result");
-    }
-    if (result["success"] === true) {
-      if (!Object.hasOwn(result, "value")) throw new TypeError("Schema parser success omitted its value");
-      const parsed = result["value"] as TValue;
-      if (isThenable(parsed)) throw new Unexpected(undefined, { cause: new TypeError("Schema parser returned a thenable value") });
-      return parsed;
-    }
-    const failure = result["error"];
-    if (!isRecord(failure) || typeof failure["message"] !== "string" || !Array.isArray(failure["issues"])) {
-      throw new TypeError("Schema parser returned an invalid failure");
-    }
-    throw new InvalidInput(failure["message"], failure["issues"] as readonly ValidationIssue[]);
+    result = descriptor.parse(value, path);
   } catch (error) {
-    throw normalizeError(error);
+    if (trustFailureDetails) throw normalizeError(error);
+    throw new Unexpected(undefined, { cause: error });
   }
+
+  let inspected: InspectedProtocolResult<TValue>;
+  try {
+    inspected = inspectProtocolResult<TValue>(result);
+  } catch (error) {
+    if (trustFailureDetails) throw normalizeError(error);
+    throw new Unexpected(undefined, { cause: error });
+  }
+  if (inspected.success) return inspected.value;
+  if (trustFailureDetails) throw new InvalidInput(inspected.message, inspected.issues as readonly ValidationIssue[]);
+
+  let issues: readonly ValidationIssue[];
+  try {
+    const rawIssues = snapshotArray(inspected.issues);
+    const normalizedIssues = new Array<ValidationIssue>(rawIssues.length);
+    for (let index = 0; index < rawIssues.length; index += 1) {
+      normalizedIssues[index] = normalizeProtocolIssue(rawIssues[index]);
+    }
+    issues = normalizedIssues;
+  } catch (error) {
+    throw new Unexpected(undefined, { cause: error });
+  }
+  throw new InvalidInput("Invalid input", issues);
 }
 
 function schemaFromCanonical<TValue, TMetadata extends SchemaMetadata>(
   metadata: TMetadata,
   parse: SchemaProtocolDescriptor<TValue, TMetadata>["parse"],
   provenance: SchemaProvenance,
+  trustFailureDetails = true,
 ): NormalizedSchema<TValue, TMetadata> {
-  const descriptor: SchemaProtocolDescriptor<TValue, TMetadata> = {
+  const descriptor: SchemaProtocolDescriptor<TValue, TMetadata> = Object.freeze({
     protocolVersion: SCHEMA_PROTOCOL_VERSION,
     canonicalVersion: CANONICAL_SCHEMA_VERSION,
     metadata,
     parse,
-  };
+  });
+  descriptorFailureTrust.set(descriptor, trustFailureDetails);
   return {
     metadata,
     provenance,
     [SCHEMA_PROTOCOL_MARKER]: descriptor,
     parse(input, path = []) {
-      return parseProtocolResult(descriptor, input, path);
+      return parseProtocolResult(descriptor, input, path, trustFailureDetails);
     },
   };
 }
@@ -372,6 +428,7 @@ export function normalizeSchema<TValue, TMetadata extends SchemaMetadata = Schem
       metadata,
       descriptor["parse"] as SchemaProtocolDescriptor<TValue, TMetadata>["parse"],
       "protocol",
+      descriptorFailureTrust.get(descriptor) === true,
     );
   }
 
@@ -405,24 +462,43 @@ export function createSchema<TValue, const TMetadata extends SchemaMetadata>(
   return schemaFromThrowingParser(normalizedMetadata, parser, "protocol");
 }
 
+function normalizeProtocolIssue(value: unknown): ValidationIssue {
+  if (!isPlainRecord(value)) throw new TypeError("Schema parser returned an invalid issue");
+  const candidateCode = value["code"];
+  const code: SchemaAdapterIssueCode = typeof candidateCode === "string"
+    && Object.hasOwn(ADAPTER_ISSUE_MESSAGES, candidateCode)
+    ? candidateCode as SchemaAdapterIssueCode
+    : "invalid_value";
+  return normalizeAdapterIssue({ path: value["path"], code }, []);
+}
+
 function normalizeAdapterIssue(
   value: unknown,
   prefix: readonly ValidationPathSegment[],
 ): ValidationIssue {
-  if (!isPlainRecord(value) || !Object.hasOwn(ADAPTER_ISSUE_MESSAGES, String(value["code"]))) {
+  if (!isPlainRecord(value)) throw new TypeError("Schema error mapper returned an invalid issue");
+  const candidateCode = value["code"];
+  if (typeof candidateCode !== "string" || !Object.hasOwn(ADAPTER_ISSUE_MESSAGES, candidateCode)) {
     throw new TypeError("Schema error mapper returned an invalid issue");
   }
-  const code = value["code"] as SchemaAdapterIssueCode;
-  const relativePath = value["path"] === undefined ? [] : value["path"];
-  if (!Array.isArray(relativePath) || relativePath.some((segment) => typeof segment !== "string" && typeof segment !== "number")) {
-    throw new TypeError("Schema error mapper returned an invalid issue path");
+  const code = candidateCode as SchemaAdapterIssueCode;
+  const rawRelativePath = value["path"] === undefined ? [] : value["path"];
+  const rawPrefix = snapshotArray(prefix);
+  const rawPath = snapshotArray(rawRelativePath);
+  const normalizedPath = new Array<ValidationPathSegment>(rawPrefix.length + rawPath.length);
+  for (let index = 0; index < normalizedPath.length; index += 1) {
+    const segment = index < rawPrefix.length ? rawPrefix[index] : rawPath[index - rawPrefix.length];
+    if (typeof segment !== "string" && typeof segment !== "number") {
+      throw new TypeError("Schema error mapper returned an invalid issue path");
+    }
+    normalizedPath[index] = segment;
   }
   const expected = value["expected"];
   const received = value["received"];
   if (expected !== undefined && typeof expected !== "string") throw new TypeError("Schema issue expected type must be a string");
   if (received !== undefined && typeof received !== "string") throw new TypeError("Schema issue received type must be a string");
   return {
-    path: [...prefix, ...relativePath] as readonly ValidationPathSegment[],
+    path: normalizedPath,
     code,
     message: ADAPTER_ISSUE_MESSAGES[code],
     ...(expected === undefined ? {} : { expected }),
@@ -486,7 +562,12 @@ export function adaptSchema<
       if (isThenable(mapped) || !Array.isArray(mapped)) {
         throw new TypeError("Schema error mapper must return issues synchronously");
       }
-      issues = mapped.map((entry) => normalizeAdapterIssue(entry, path));
+      const rawIssues = snapshotArray(mapped);
+      const normalizedIssues = new Array<ValidationIssue>(rawIssues.length);
+      for (let index = 0; index < rawIssues.length; index += 1) {
+        normalizedIssues[index] = normalizeAdapterIssue(rawIssues[index], path);
+      }
+      issues = normalizedIssues;
     } catch (error) {
       throw new Unexpected(undefined, { cause: error });
     }
