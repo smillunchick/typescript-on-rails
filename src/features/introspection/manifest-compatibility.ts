@@ -27,6 +27,12 @@ function isRecord(value: unknown): value is RecordValue {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isPlainRecord(value: unknown): value is RecordValue {
+  if (!isRecord(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 function malformed(path: string, expected: string): never {
   throw new ManifestCompatibilityError("malformed-v2", `Invalid manifest v2: ${path} must be ${expected}.`);
 }
@@ -37,13 +43,49 @@ function objectAt(value: unknown, path: string): RecordValue {
 }
 
 function arrayAt(value: unknown, path: string): readonly unknown[] {
-  if (!Array.isArray(value)) malformed(path, "an array");
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) malformed(path, "a plain array");
+  const keys = Object.keys(value);
+  if (keys.length !== value.length || keys.some((key, index) => key !== String(index))) malformed(path, "a dense array without extra fields");
   return value;
 }
 
 function stringAt(value: unknown, path: string): string {
   if (typeof value !== "string") malformed(path, "a string");
   return value;
+}
+
+function booleanAt(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") malformed(path, "a boolean");
+  return value;
+}
+
+function exactObjectAt(
+  value: unknown,
+  path: string,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): RecordValue {
+  if (!isPlainRecord(value)) malformed(path, "a plain object");
+  const allowed = new Set([...required, ...optional]);
+  if (!required.every((key) => Object.hasOwn(value, key)) || Object.keys(value).some((key) => !allowed.has(key))) {
+    malformed(path, "an object with the exact supported fields");
+  }
+  return value;
+}
+
+function isStrictlySorted(entries: readonly string[]): boolean {
+  let previous: string | undefined;
+  for (const entry of entries) {
+    if (previous !== undefined && previous >= entry) return false;
+    previous = entry;
+  }
+  return true;
+}
+
+function sortedUniqueStringsAt(value: unknown, path: string): readonly string[] {
+  const entries = arrayAt(value, path).map((entry, index) => stringAt(entry, `${path}[${String(index)}]`));
+  if (!isStrictlySorted(entries)) malformed(path, "a sorted array of unique strings");
+  return entries;
 }
 
 function lineAt(value: unknown, path: string): number {
@@ -78,6 +120,245 @@ function diagnosticAt(value: unknown, path: string): void {
   stringAt(record.code, `${path}.code`);
   stringAt(record.path, `${path}.path`);
   stringAt(record.message, `${path}.message`);
+  if (record.detail !== undefined) stringAt(record.detail, `${path}.detail`);
+}
+
+function literalAt(value: unknown, path: string): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value !== "number" || !Number.isFinite(value) || Object.is(value, -0)) {
+    malformed(path, "a canonical finite literal value");
+  }
+}
+
+function canonicalJsonAt(value: unknown, path: string, ancestors = new Set<object>()): void {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Object.is(value, -0)) malformed(path, "a canonical finite JSON number");
+    return;
+  }
+  if (typeof value !== "object") malformed(path, "canonical JSON data");
+  if (ancestors.has(value)) malformed(path, "acyclic canonical JSON data");
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      for (const [index, entry] of arrayAt(value, path).entries()) canonicalJsonAt(entry, `${path}[${String(index)}]`, ancestors);
+      return;
+    }
+    if (!isPlainRecord(value)) malformed(path, "a plain canonical JSON object");
+    const keys = Object.keys(value);
+    if (!isStrictlySorted(keys)) malformed(path, "a canonical JSON object with sorted keys");
+    for (const key of keys) canonicalJsonAt(value[key], `${path}.${key}`, ancestors);
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function schemaMetadataAt(value: unknown, path: string, ancestors = new Set<object>()): void {
+  if (!isPlainRecord(value)) malformed(path, "plain schema metadata");
+  if (ancestors.has(value)) malformed(path, "acyclic schema metadata");
+  ancestors.add(value);
+  try {
+    const kind = stringAt(value.kind, `${path}.kind`);
+    switch (kind) {
+      case "string":
+      case "number":
+      case "boolean":
+      case "date":
+        exactObjectAt(value, path, ["kind"]);
+        return;
+      case "id": {
+        const metadata = exactObjectAt(value, path, ["kind"], ["entity"]);
+        if (metadata.entity !== undefined && stringAt(metadata.entity, `${path}.entity`).length === 0) {
+          malformed(`${path}.entity`, "a nonempty string");
+        }
+        return;
+      }
+      case "money": {
+        const metadata = exactObjectAt(value, path, ["kind", "currency"]);
+        if (metadata.currency !== "minor-unit") malformed(`${path}.currency`, '"minor-unit"');
+        return;
+      }
+      case "enum": {
+        const metadata = exactObjectAt(value, path, ["kind", "values"]);
+        const values = arrayAt(metadata.values, `${path}.values`);
+        if (values.length === 0) malformed(`${path}.values`, "a nonempty array");
+        for (const [index, entry] of values.entries()) literalAt(entry, `${path}.values[${String(index)}]`);
+        return;
+      }
+      case "literal": {
+        const metadata = exactObjectAt(value, path, ["kind", "value"]);
+        literalAt(metadata.value, `${path}.value`);
+        return;
+      }
+      case "optional": {
+        const metadata = exactObjectAt(value, path, ["kind", "inner"]);
+        schemaMetadataAt(metadata.inner, `${path}.inner`, ancestors);
+        return;
+      }
+      case "array": {
+        const metadata = exactObjectAt(value, path, ["kind", "items"]);
+        schemaMetadataAt(metadata.items, `${path}.items`, ancestors);
+        return;
+      }
+      case "object": {
+        const metadata = exactObjectAt(value, path, ["kind", "fields"]);
+        if (!isPlainRecord(metadata.fields)) malformed(`${path}.fields`, "a plain object");
+        const keys = Object.keys(metadata.fields);
+        if (!isStrictlySorted(keys)) malformed(`${path}.fields`, "an object with sorted field names");
+        for (const key of keys) schemaMetadataAt(metadata.fields[key], `${path}.fields.${key}`, ancestors);
+        return;
+      }
+      case "extension": {
+        const metadata = exactObjectAt(value, path, ["kind", "namespace", "name", "version", "payload", "underlying"]);
+        for (const name of ["namespace", "name", "version"] as const) {
+          if (stringAt(metadata[name], `${path}.${name}`).length === 0) malformed(`${path}.${name}`, "a nonempty string");
+        }
+        canonicalJsonAt(metadata.payload, `${path}.payload`);
+        schemaMetadataAt(metadata.underlying, `${path}.underlying`, ancestors);
+        return;
+      }
+      default:
+        malformed(`${path}.kind`, "a supported schema metadata kind");
+    }
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+const TYPE_CONTRACT_PRIMITIVES = new Set(["bigint", "boolean", "number", "string", "symbol"]);
+const TYPE_CONTRACT_LEAF_KINDS = new Set(["unknown", "undefined", "void", "date"]);
+
+function typeContractAt(value: unknown, path: string): void {
+  const contract = exactObjectAt(value, path, ["version", "root", "nodes"]);
+  if (contract.version !== 1) malformed(`${path}.version`, "1");
+  const root = stringAt(contract.root, `${path}.root`);
+  const nodes = arrayAt(contract.nodes, `${path}.nodes`);
+  if (nodes.length === 0) malformed(`${path}.nodes`, "a nonempty array");
+
+  const references = new Map<string, readonly string[]>();
+  const semantics = new Map<string, (signatureFor: (id: string) => string) => unknown>();
+  for (const [index, rawNode] of nodes.entries()) {
+    const nodePath = `${path}.nodes[${String(index)}]`;
+    if (!isPlainRecord(rawNode)) malformed(nodePath, "a plain type-contract node");
+    const node = rawNode;
+    const expectedId = `n${String(index)}`;
+    if (node.id !== expectedId) malformed(`${nodePath}.id`, `the canonical node ID ${expectedId}`);
+    const kind = stringAt(node.kind, `${nodePath}.kind`);
+    let nodeReferences: readonly string[] = [];
+    if (kind === "primitive") {
+      const typed = exactObjectAt(rawNode, nodePath, ["id", "kind", "name"]);
+      if (!TYPE_CONTRACT_PRIMITIVES.has(stringAt(typed.name, `${nodePath}.name`))) malformed(`${nodePath}.name`, "a supported primitive");
+      semantics.set(expectedId, () => ({ kind, name: typed.name }));
+    } else if (kind === "literal") {
+      const typed = exactObjectAt(rawNode, nodePath, ["id", "kind", "valueType", "value"]);
+      const valueType = stringAt(typed.valueType, `${nodePath}.valueType`);
+      const literal = typed.value;
+      const valid = valueType === "null" ? literal === null
+        : valueType === "boolean" ? typeof literal === "boolean"
+        : valueType === "number" ? typeof literal === "number" && Number.isFinite(literal) && !Object.is(literal, -0)
+        : valueType === "string" ? typeof literal === "string"
+        : valueType === "bigint" ? typeof literal === "string" && /^-?(?:0|[1-9][0-9]*)$/.test(literal) && literal !== "-0"
+        : false;
+      if (!valid) malformed(`${nodePath}.value`, "a canonical literal matching valueType");
+      semantics.set(expectedId, () => ({ kind, valueType, value: literal }));
+    } else if (TYPE_CONTRACT_LEAF_KINDS.has(kind)) {
+      exactObjectAt(rawNode, nodePath, ["id", "kind"]);
+      semantics.set(expectedId, () => ({ kind }));
+    } else if (kind === "array") {
+      const typed = exactObjectAt(rawNode, nodePath, ["id", "kind", "element", "readonly"]);
+      const element = stringAt(typed.element, `${nodePath}.element`);
+      const readonly = booleanAt(typed.readonly, `${nodePath}.readonly`);
+      nodeReferences = [element];
+      semantics.set(expectedId, (signatureFor) => ({ kind, element: signatureFor(element), readonly }));
+    } else if (kind === "tuple") {
+      const typed = exactObjectAt(rawNode, nodePath, ["id", "kind", "elements", "readonly"]);
+      const readonly = booleanAt(typed.readonly, `${nodePath}.readonly`);
+      const elements = arrayAt(typed.elements, `${nodePath}.elements`).map((rawElement, elementIndex) => {
+        const elementPath = `${nodePath}.elements[${String(elementIndex)}]`;
+        const element = exactObjectAt(rawElement, elementPath, ["type", "optional", "rest"]);
+        return {
+          type: stringAt(element.type, `${elementPath}.type`),
+          optional: booleanAt(element.optional, `${elementPath}.optional`),
+          rest: booleanAt(element.rest, `${elementPath}.rest`),
+        };
+      });
+      nodeReferences = elements.map((entry) => entry.type);
+      semantics.set(expectedId, (signatureFor) => ({ kind, elements: elements.map((entry) => ({ ...entry, type: signatureFor(entry.type) })), readonly }));
+    } else if (kind === "object") {
+      const typed = exactObjectAt(rawNode, nodePath, ["id", "kind", "properties"]);
+      const properties = arrayAt(typed.properties, `${nodePath}.properties`).map((rawProperty, propertyIndex) => {
+        const propertyPath = `${nodePath}.properties[${String(propertyIndex)}]`;
+        const property = exactObjectAt(rawProperty, propertyPath, ["name", "type", "optional", "readonly"]);
+        return {
+          name: stringAt(property.name, `${propertyPath}.name`),
+          type: stringAt(property.type, `${propertyPath}.type`),
+          optional: booleanAt(property.optional, `${propertyPath}.optional`),
+          readonly: booleanAt(property.readonly, `${propertyPath}.readonly`),
+        };
+      });
+      if (!isStrictlySorted(properties.map((entry) => entry.name))) {
+        malformed(`${nodePath}.properties`, "properties sorted by unique name");
+      }
+      nodeReferences = properties.map((entry) => entry.type);
+      semantics.set(expectedId, (signatureFor) => ({ kind, properties: properties.map((entry) => ({ ...entry, type: signatureFor(entry.type) })) }));
+    } else if (kind === "union") {
+      const typed = exactObjectAt(rawNode, nodePath, ["id", "kind", "members"]);
+      const members = arrayAt(typed.members, `${nodePath}.members`).map((entry, memberIndex) => stringAt(entry, `${nodePath}.members[${String(memberIndex)}]`));
+      let previousMember = -1;
+      for (const member of members) {
+        const match = /^n(0|[1-9][0-9]*)$/.exec(member);
+        const currentMember = match === null ? Number.NaN : Number(match[1]);
+        if (!Number.isSafeInteger(currentMember) || currentMember <= previousMember) {
+          malformed(`${nodePath}.members`, "members sorted by unique canonical node ID");
+        }
+        previousMember = currentMember;
+      }
+      nodeReferences = members;
+      semantics.set(expectedId, (signatureFor) => ({ kind, members: members.map(signatureFor) }));
+    } else {
+      malformed(`${nodePath}.kind`, "a supported type-contract node kind");
+    }
+    references.set(expectedId, nodeReferences);
+  }
+
+  if (!references.has(root)) malformed(`${path}.root`, "a node ID in the contract");
+  for (const [id, nodeReferences] of references) {
+    for (const reference of nodeReferences) {
+      if (!references.has(reference)) malformed(`${path}.nodes.${id}`, `a node whose reference ${reference} exists`);
+    }
+  }
+
+  const state = new Map<string, "active" | "complete">();
+  const signatures = new Map<string, string>();
+  const signatureFor = (id: string): string => {
+    const known = signatures.get(id);
+    if (known !== undefined) return known;
+    if (state.get(id) === "active") malformed(`${path}.nodes.${id}`, "an acyclic type-contract graph");
+    state.set(id, "active");
+    const semantic = semantics.get(id);
+    if (semantic === undefined) malformed(`${path}.nodes.${id}`, "a supported type-contract node");
+    const signature = JSON.stringify(semantic(signatureFor));
+    signatures.set(id, signature);
+    state.set(id, "complete");
+    return signature;
+  };
+  for (const id of references.keys()) signatureFor(id);
+
+  const reachable = new Set<string>();
+  const visit = (id: string): void => {
+    if (reachable.has(id)) return;
+    reachable.add(id);
+    for (const reference of references.get(id) ?? []) visit(reference);
+  };
+  visit(root);
+  if (reachable.size !== nodes.length) malformed(`${path}.nodes`, "only nodes reachable from root");
+  const orderedSignatures: string[] = [];
+  for (const id of references.keys()) {
+    const signature = signatures.get(id);
+    if (signature === undefined) malformed(`${path}.nodes.${id}`, "a canonical node signature");
+    orderedSignatures.push(signature);
+  }
+  if (!isStrictlySorted(orderedSignatures)) malformed(`${path}.nodes`, "unique nodes in canonical signature order");
 }
 
 function architectureDiagnosticAt(value: unknown, path: string): void {
@@ -95,7 +376,7 @@ function runtimeSchemaAt(value: unknown, path: string): void {
   const validator = stringAt(facet.validator, `${path}.validator`);
   if (status === "resolved" && validator === "declared") {
     if (facet.provenance !== "declared-schema") malformed(`${path}.provenance`, '"declared-schema"');
-    objectAt(facet.metadata, `${path}.metadata`);
+    schemaMetadataAt(facet.metadata, `${path}.metadata`);
     return;
   }
   if (status === "unresolved" && (validator === "declared" || validator === "not-declared")) {
@@ -110,8 +391,9 @@ function runtimeSchemaAt(value: unknown, path: string): void {
 function staticTypeAt(value: unknown, path: string): void {
   const facet = objectAt(value, path);
   if (facet.provenance !== "inferred-typescript") malformed(`${path}.provenance`, '"inferred-typescript"');
+  sortedUniqueStringsAt(facet.labels, `${path}.labels`);
   if (facet.status === "resolved") {
-    objectAt(facet.contract, `${path}.contract`);
+    typeContractAt(facet.contract, `${path}.contract`);
     return;
   }
   if (facet.status === "unresolved") {

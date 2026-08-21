@@ -21,6 +21,7 @@ import {
 export type AnalyzeForDiff = (root: string) => unknown;
 
 const EARLIEST_SUPPORTED_BASE = "Choose the manifest v2 migration commit, or a later commit with effective package policy, as the earliest supported architecture-diff base.";
+const PACKAGE_CAPABILITY_RULE = "package-capability";
 
 export type GitArchitectureDiffCompatibilityErrorCode =
   | "unsupported-architecture-diff-base"
@@ -38,9 +39,11 @@ export class GitArchitectureDiffCompatibilityError extends Error {
   }
 }
 
-function hasPackagePolicyError(manifest: ArchitectureManifest): boolean {
+function hasInvalidEffectivePackagePolicy(manifest: ArchitectureManifest): boolean {
   return manifest.diagnostics.some((entry) => (
     entry.severity === "error" && entry.rule === PACKAGE_POLICY_RULE
+  ) || (
+    entry.rule === PACKAGE_CAPABILITY_RULE && entry.packageCapabilityMigration !== undefined
   ));
 }
 
@@ -57,7 +60,7 @@ function assertSupportedBase(value: unknown): asserts value is ArchitectureManif
     }
     throw error;
   }
-  if (hasPackagePolicyError(value)) {
+  if (hasInvalidEffectivePackagePolicy(value)) {
     throw new GitArchitectureDiffCompatibilityError(
       "The Git base has no valid effective package policy and predates the supported migration boundary.",
       "unsupported-architecture-diff-base",
@@ -67,7 +70,7 @@ function assertSupportedBase(value: unknown): asserts value is ArchitectureManif
 
 function assertSupportedWorkingTree(value: unknown): asserts value is ArchitectureManifest {
   assertComparableManifestV2(value);
-  if (hasPackagePolicyError(value)) {
+  if (hasInvalidEffectivePackagePolicy(value)) {
     throw new GitArchitectureDiffCompatibilityError(
       "The working tree has no valid effective package policy. Configure typescriptOnRails.packageCapabilities before comparing architecture.",
       "invalid-working-tree-architecture",

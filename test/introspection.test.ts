@@ -351,6 +351,58 @@ describe("semantic architecture diff", () => {
     assert.match(formatArchitectureDiff(diff), /Package policy changed: date-lib \(external-system\)/);
   });
 
+  it("rejects malformed nested schema metadata, type contracts, and labels", () => {
+    const withStaticType = (staticType: unknown): unknown => ({
+      ...manifest(),
+      operations: manifest().operations.map((entry) => ({
+        ...entry,
+        input: { ...entry.input, staticType },
+      })),
+    });
+    const withContract = (contract: unknown): unknown => withStaticType({
+      status: "resolved",
+      provenance: "inferred-typescript",
+      contract,
+      labels: [],
+    });
+    const withMetadata = (metadata: unknown): unknown => ({
+      ...manifest(),
+      models: manifest().models.map((entry) => ({
+        ...entry,
+        fields: { ...resolvedStringSchema, metadata },
+      })),
+    });
+    const primitive = { id: "n0", kind: "primitive", name: "string" };
+    const malformedInputs: readonly unknown[] = [
+      withContract({ version: 1, root: "n0", nodes: [] }),
+      withContract({ version: 2, root: "n0", nodes: [primitive] }),
+      withContract({ version: 1, root: "n0", nodes: [{ ...primitive, id: "node" }] }),
+      withContract({ version: 1, root: "n0", nodes: [{ id: "n0", kind: "unsupported" }] }),
+      withContract({ version: 1, root: "n1", nodes: [primitive] }),
+      withContract({ version: 1, root: "n0", nodes: [{ id: "n0", kind: "array", element: "n1", readonly: false }] }),
+      withContract({
+        version: 1,
+        root: "n0",
+        nodes: [
+          { id: "n0", kind: "array", element: "n1", readonly: false },
+          { id: "n1", kind: "array", element: "n0", readonly: false },
+        ],
+      }),
+      withMetadata({ kind: "unsupported" }),
+      withMetadata({ kind: "extension", namespace: "acme", name: "", version: "1", payload: null, underlying: { kind: "string" } }),
+      withMetadata({ kind: "extension", namespace: "acme", name: "token", version: "1", payload: new Date(0), underlying: { kind: "string" } }),
+      withStaticType({ ...resolvedStatic, labels: ["Zulu", "Alpha"] }),
+      withStaticType({ ...resolvedStatic, labels: ["Alpha", "Alpha"] }),
+    ];
+
+    for (const value of malformedInputs) {
+      assert.throws(
+        () => diffArchitecture(value, manifest()),
+        (error: unknown) => error instanceof ManifestCompatibilityError && error.code === "malformed-v2",
+      );
+    }
+  });
+
   it("rejects v1, mixed, malformed, null-ID, and duplicate-ID runtime inputs with typed guidance", () => {
     const invalidInputs: Array<{ readonly value: unknown; readonly code: ManifestCompatibilityErrorCode }> = [
       { value: { version: 1 }, code: "mixed-version" },

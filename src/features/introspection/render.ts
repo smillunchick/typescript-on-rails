@@ -70,6 +70,9 @@ export function formatRouteExplanation(explanation: RouteExplanation): string {
     `Route: ${explanation.method ?? "?"} ${explanation.path ?? explanation.name}`,
     `Name: ${explanation.name}`,
     `Feature: ${explanation.feature ?? "none"}`,
+    `Access: ${explanation.access}`,
+    `Input: static ${explanation.input.staticType.status}; runtime ${explanation.input.runtimeSchema.status}`,
+    `Output: static ${explanation.output.staticType.status}; runtime ${explanation.output.runtimeSchema.status}`,
     `Permission: ${explanation.permission ?? "none"}`,
   ].join("\n") + "\n";
 }

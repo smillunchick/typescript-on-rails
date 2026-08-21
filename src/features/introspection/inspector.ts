@@ -4,10 +4,12 @@ import {
   type AnalyzeApplicationOptions,
   type ArchitectureExceptionManifest,
   type ArchitectureManifest,
+  type ContractSlot,
   type DependencyManifest,
   type EventManifest,
   type FeatureManifest,
   type ModelManifest,
+  type OperationAccess,
   type OperationManifest,
   type PublicExportManifest,
   type RouteManifest,
@@ -91,6 +93,9 @@ export interface RouteExplanation extends IdentityProjection {
   readonly method: string | null;
   readonly path: string | null;
   readonly feature: string | null;
+  readonly input: ContractSlot;
+  readonly output: ContractSlot;
+  readonly access: OperationAccess;
   readonly permission?: string;
 }
 
@@ -288,6 +293,9 @@ export function inspectManifest(manifest: ArchitectureManifest): ApplicationInsp
           method: route.method,
           path: route.path,
           feature: route.feature,
+          input: route.input,
+          output: route.output,
+          access: route.access,
           ...(route.permission === undefined ? {} : { permission: route.permission }),
         },
       };

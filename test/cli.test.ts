@@ -177,6 +177,44 @@ describe("app CLI checks and lifecycle", () => {
     });
   });
 
+  it("returns typed JSON for manifest and Git compatibility failures", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "tor-cli-compatibility-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+
+    const manifestFailure = await invoke(["check", "--json"], root, {
+      analyze: () => {
+        throw new ManifestCompatibilityError("persisted-v1", "Manifest v1 is unsupported.");
+      },
+    });
+    assert.equal(manifestFailure.code, 1);
+    assert.deepEqual(JSON.parse(manifestFailure.stdout), {
+      ok: false,
+      error: {
+        name: "ManifestCompatibilityError",
+        code: "persisted-v1",
+        message: "Manifest v1 is unsupported. Regenerate the architecture manifest from source with the current analyzer.",
+      },
+    });
+
+    const gitFailure = await invoke(["diff", "--architecture", "--json"], root, {
+      architectureDiff: async () => {
+        throw new GitArchitectureDiffCompatibilityError(
+          "The working tree policy is invalid.",
+          "invalid-working-tree-architecture",
+        );
+      },
+    });
+    assert.equal(gitFailure.code, 1);
+    assert.deepEqual(JSON.parse(gitFailure.stdout), {
+      ok: false,
+      error: {
+        name: "GitArchitectureDiffCompatibilityError",
+        code: "invalid-working-tree-architecture",
+        message: "The working tree policy is invalid.",
+      },
+    });
+  });
+
   it("delegates lifecycle commands to explicit app-owned scripts", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "tor-cli-life-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
@@ -256,6 +294,13 @@ describe("app CLI architecture views", () => {
     const routeJson = JSON.parse(route.stdout);
     assert.equal(routeJson.status, "resolved");
     assert.equal(routeJson.value.permission, "invoice.read");
+    assert.equal(routeJson.value.input.runtimeSchema.status, "not-declared");
+    assert.equal(routeJson.value.output.staticType.status, "resolved");
+    const operation = await invoke(["explain", "sid1/operation/feature/billing/approveInvoice", "--json"], app.root);
+    assert.equal(operation.code, 0, operation.stderr);
+    const operationJson = JSON.parse(operation.stdout);
+    assert.equal(operationJson.value.output.staticType.status, "resolved");
+    assert.deepEqual(operationJson.value.output.runtimeSchema, { status: "not-declared", validator: "not-declared" });
     const graph = await invoke(["graph", "--dot"], app.root);
     assert.match(graph.stdout, /"reports" -> "billing"/);
 
@@ -283,7 +328,7 @@ describe("app CLI architecture views", () => {
     const app = await fixture({ "src/features/health/index.ts": "export const healthy = true;" });
     const result = await invoke(["explain", "missing"], app.root);
     assert.equal(result.code, 1);
-    assert.match(result.stderr, /No feature or route matches selector missing/);
+    assert.match(result.stderr, /No semantic record matches selector missing/);
     const jsonResult = await invoke(["explain", "missing", "--json"], app.root);
     assert.equal(jsonResult.code, 1);
     assert.deepEqual(JSON.parse(jsonResult.stdout), { status: "not-found", selector: "missing", candidates: [] });
@@ -303,9 +348,10 @@ describe("app CLI architecture views", () => {
     assert.equal(crossJson.status, "ambiguous");
     assert.deepEqual(crossJson.candidates.map((entry: { id: string }) => entry.id), [
       "sid1/feature/feature/alpha/alpha",
+      "sid1/public-export/feature/beta/alpha",
       "sid1/route/feature/beta/alpha",
     ]);
-    assert.match(cross.stderr, /Ambiguous feature or route selector alpha/);
+    assert.match(cross.stderr, /Ambiguous semantic record selector alpha/);
 
     const pathAmbiguity = await invoke(["explain", "/same", "--json"], app.root);
     assert.equal(pathAmbiguity.code, 1);
@@ -563,6 +609,36 @@ describe("app diff --architecture", () => {
         };
       }),
       (error: unknown) => error instanceof GitArchitectureDiffCompatibilityError
+        && /effective package policy/.test(error.message),
+    );
+    const unknownPackageDiagnostic = {
+      code: "ARCH007",
+      rule: "package-capability",
+      severity: "error" as const,
+      message: "unknown package",
+      file: "src/features/billing/index.ts",
+      line: 1,
+      packageCapabilityMigration: {
+        inventory: [{ package: "unknown-package", uses: [{ file: "src/features/billing/index.ts", line: 1 }] }],
+        packageCapabilities: { "unknown-package": "CHOOSE: pure | ui | external-system | host-io" },
+      },
+    };
+    await assert.rejects(
+      createGitArchitectureDiff(app.root, "HEAD", (root) => {
+        const analysis = analyzeApplication(root);
+        return root === app.root ? analysis : { ...analysis, diagnostics: [unknownPackageDiagnostic] };
+      }),
+      (error: unknown) => error instanceof GitArchitectureDiffCompatibilityError
+        && error.code === "unsupported-architecture-diff-base"
+        && /effective package policy/.test(error.message),
+    );
+    await assert.rejects(
+      createGitArchitectureDiff(app.root, "HEAD", (root) => {
+        const analysis = analyzeApplication(root);
+        return root === app.root ? { ...analysis, diagnostics: [unknownPackageDiagnostic] } : analysis;
+      }),
+      (error: unknown) => error instanceof GitArchitectureDiffCompatibilityError
+        && error.code === "invalid-working-tree-architecture"
         && /effective package policy/.test(error.message),
     );
     await assert.rejects(

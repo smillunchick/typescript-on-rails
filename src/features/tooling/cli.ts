@@ -11,8 +11,10 @@ import {
   graphAsDot,
   graphAsText,
   inspectApplication,
+  ManifestCompatibilityError,
   type ApplicationInspector,
   type ArchitectureDiff,
+  type ResolvedSemanticSelector,
   type SemanticSelectorFailure,
 } from "../introspection/index.js";
 import {
@@ -20,6 +22,7 @@ import {
   createApplication,
   createFeature,
   createGitArchitectureDiff,
+  GitArchitectureDiffCompatibilityError,
   createModel,
   createQuery,
   hasAppOwnedScript,
@@ -66,7 +69,7 @@ Commands:
   check [--json] [--with-tests]
   create feature <name>
   create model|action|query <name> --feature <feature>
-  explain <feature-or-route> [--json]
+  explain <semantic-record> [--json]
   graph [--json | --dot]
   owners|boundaries|exceptions [--json]
   impact <public-symbol> [--json]
@@ -183,21 +186,30 @@ function formatSelectorFailure(noun: string, result: SemanticSelectorFailure): s
   ].join("\n") + "\n";
 }
 
+function formatResolvedRecord(result: ResolvedSemanticSelector): string {
+  return [
+    result.candidate.displayName,
+    `Semantic ID: ${result.candidate.id}`,
+    `Category: ${result.candidate.category}`,
+    JSON.stringify(result.value, null, 2),
+  ].join("\n") + "\n";
+}
+
 function runExplain(args: readonly string[], inspector: ApplicationInspector, stdout: CliStream, stderr: CliStream): number {
   const target = args[0];
-  if (target === undefined) throw new CliUsageError("Expected a feature or route");
+  if (target === undefined) throw new CliUsageError("Expected a semantic record");
   onlyFlags(args.slice(1), ["--json"]);
   const asJson = oneFlag(args.slice(1), "--json");
-  const selected = inspector.resolve(target, ["feature", "route"]);
+  const selected = inspector.resolve(target);
   if (selected.status !== "resolved") {
-    stderr.write(formatSelectorFailure("feature or route", selected));
+    stderr.write(formatSelectorFailure("semantic record", selected));
     if (asJson) json(stdout, selected);
     return 1;
   }
   if (selected.candidate.category === "route") {
     const explanation = inspector.explainRoute(selected.candidate.id);
     if (explanation.status !== "resolved") {
-      stderr.write(formatSelectorFailure("feature or route", explanation));
+      stderr.write(formatSelectorFailure("semantic record", explanation));
       if (asJson) json(stdout, explanation);
       return 1;
     }
@@ -205,14 +217,19 @@ function runExplain(args: readonly string[], inspector: ApplicationInspector, st
     else stdout.write(formatRouteExplanation(explanation.value));
     return 0;
   }
-  const explanation = inspector.explainFeature(selected.candidate.id);
-  if (explanation.status !== "resolved") {
-    stderr.write(formatSelectorFailure("feature or route", explanation));
+  if (selected.candidate.category === "feature") {
+    const explanation = inspector.explainFeature(selected.candidate.id);
+    if (explanation.status !== "resolved") {
+      stderr.write(formatSelectorFailure("semantic record", explanation));
+      if (asJson) json(stdout, explanation);
+      return 1;
+    }
     if (asJson) json(stdout, explanation);
-    return 1;
+    else stdout.write(formatFeatureExplanation(explanation.value));
+    return 0;
   }
-  if (asJson) json(stdout, explanation);
-  else stdout.write(formatFeatureExplanation(explanation.value));
+  if (asJson) json(stdout, selected);
+  else stdout.write(formatResolvedRecord(selected));
   return 0;
 }
 
@@ -304,6 +321,12 @@ function formatCliError(error: unknown): string {
   return [message, ...error.errors.map(formatCliError)].join("\n");
 }
 
+function compatibilityError(error: unknown): { readonly name: string; readonly code: string; readonly message: string } | null {
+  return error instanceof ManifestCompatibilityError || error instanceof GitArchitectureDiffCompatibilityError
+    ? { name: error.name, code: error.code, message: error.message }
+    : null;
+}
+
 export async function runCli(args: readonly string[], dependencies: CliDependencies = {}): Promise<number> {
   const cwd = dependencies.cwd ?? process.cwd();
   const stdout = dependencies.stdout ?? process.stdout;
@@ -347,6 +370,8 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       stderr.write(`${usage}${error instanceof Error ? `\n${error.message}\n` : ""}`);
       return 2;
     }
+    const typedError = compatibilityError(error);
+    if (typedError !== null && args.includes("--json")) json(stdout, { ok: false, error: typedError });
     stderr.write(`${formatCliError(error)}\n`);
     return 1;
   }
