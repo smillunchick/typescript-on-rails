@@ -10,6 +10,7 @@ import {
   adaptSchema,
   number,
   object,
+  operationRoute,
   query,
   route,
   string,
@@ -109,6 +110,26 @@ describe("actions, queries, and routes", () => {
 
     assert.equal(await show.execute({ name: "Ada" }, anonymous), "Hello, Ada");
     assert.equal(show.metadata.kind, "route");
+  });
+
+  it("derives a route contract and execution from one operation", async () => {
+    const greet = action({
+      input: object({ name: string() }),
+      output: string(),
+      permission: "greeting.create",
+      run: ({ name }) => `Hello, ${name}`,
+    });
+    const endpoint = operationRoute({ method: "POST", path: "/greetings", operation: greet });
+
+    assert.equal(endpoint.operation, greet);
+    assert.deepEqual(endpoint.metadata.input, greet.metadata.input);
+    assert.deepEqual(endpoint.metadata.output, greet.metadata.output);
+    assert.equal(endpoint.metadata.permission, "greeting.create");
+    await assert.rejects(() => endpoint.execute({ name: "Ada" }, anonymous), Forbidden);
+    assert.equal(
+      await endpoint.execute({ name: "Ada" }, { permissions: new Set(["greeting.create"]) }),
+      "Hello, Ada",
+    );
   });
 
   it("enforces route permission access", async () => {

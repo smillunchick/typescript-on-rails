@@ -7,6 +7,42 @@ type MaybePromise<T> = T | Promise<T>;
 
 export type EntrypointKind = "web" | "worker" | "scheduler";
 
+const RUNTIME_BINDING = "typescript-on-rails.runtime-binding/v1" as const;
+
+export interface RuntimeBinding<TTarget extends object = object> {
+  readonly runtimeBinding: typeof RUNTIME_BINDING;
+  readonly binding: {
+    readonly kind: "runtime-binding";
+    readonly name: string;
+    readonly protocol: string;
+    readonly process: EntrypointKind;
+  };
+  readonly target: TTarget;
+}
+
+export function runtimeBinding<TTarget extends object>(definition: {
+  readonly name: string;
+  readonly protocol: string;
+  readonly process: EntrypointKind;
+  readonly target: TTarget;
+}): RuntimeBinding<TTarget> {
+  if (!definition.name || !definition.protocol) throw new TypeError("A runtime binding needs a name and protocol");
+  return Object.freeze({
+    runtimeBinding: RUNTIME_BINDING,
+    binding: Object.freeze({
+      kind: "runtime-binding" as const,
+      name: definition.name,
+      protocol: definition.protocol,
+      process: definition.process,
+    }),
+    target: definition.target,
+  });
+}
+
+export function isRuntimeBinding(value: unknown): value is RuntimeBinding {
+  return typeof value === "object" && value !== null && "runtimeBinding" in value && value.runtimeBinding === RUNTIME_BINDING;
+}
+
 export interface PageDefinition {
   readonly metadata: {
     readonly kind: "page";
@@ -24,7 +60,7 @@ export function page(definition: Omit<PageDefinition["metadata"], "kind">): Page
   return Object.freeze({ metadata: Object.freeze({ kind: "page", ...definition }) });
 }
 
-export interface ConsumerDefinition<TPayload = unknown> {
+export interface ConsumerDefinition<TPayload = unknown, TContext = undefined> {
   readonly event: EventDefinition<TPayload>;
   readonly metadata: {
     readonly kind: "consumer";
@@ -32,15 +68,15 @@ export interface ConsumerDefinition<TPayload = unknown> {
     readonly event: string;
     readonly durable: boolean;
   };
-  handle(payload: TPayload): MaybePromise<void>;
+  handle(payload: TPayload, context: TContext): MaybePromise<void>;
 }
 
-export function consumer<TPayload>(definition: {
+export function consumer<TPayload, TContext = undefined>(definition: {
   readonly name: string;
   readonly event: EventDefinition<TPayload>;
   readonly durable?: boolean;
-  readonly handle: (payload: TPayload) => MaybePromise<void>;
-}): ConsumerDefinition<TPayload> {
+  readonly handle: (payload: TPayload, context: TContext) => MaybePromise<void>;
+}): ConsumerDefinition<TPayload, TContext> {
   return Object.freeze({
     event: definition.event,
     metadata: Object.freeze({
@@ -59,16 +95,26 @@ export interface ApplicationEntrypoint {
     readonly name: string;
     readonly process: EntrypointKind;
   };
+  readonly bindings: readonly RuntimeBinding[];
   run(signal: AbortSignal): MaybePromise<void>;
 }
 
 export function entrypoint(definition: {
   readonly name: string;
   readonly process: EntrypointKind;
+  readonly bindings?: readonly RuntimeBinding[];
   readonly run: (signal: AbortSignal) => MaybePromise<void>;
 }): ApplicationEntrypoint {
+  if (!definition.name) throw new TypeError("An entrypoint needs a name");
+  const bindings = [...(definition.bindings ?? [])];
+  for (const binding of bindings) {
+    if (!isRuntimeBinding(binding) || binding.binding.process !== definition.process) {
+      throw new TypeError(`Invalid ${definition.process} runtime binding`);
+    }
+  }
   return Object.freeze({
-    metadata: Object.freeze({ kind: "entrypoint", name: definition.name, process: definition.process }),
+    metadata: Object.freeze({ kind: "entrypoint" as const, name: definition.name, process: definition.process }),
+    bindings: Object.freeze(bindings),
     run: definition.run,
   });
 }
@@ -85,7 +131,7 @@ export interface FeatureRegistration<TContext extends ExecutionContext = Executi
   readonly pages: readonly PageDefinition[];
   readonly permissions: readonly string[];
   readonly events: readonly EventDefinition<unknown>[];
-  readonly consumers: readonly ConsumerDefinition<unknown>[];
+  readonly consumers: readonly ConsumerDefinition<unknown, unknown>[];
   readonly adapters: readonly AdapterInstance<AdapterOperations>[];
   readonly tests: readonly string[];
 }
@@ -97,7 +143,7 @@ export function defineFeature<TContext extends ExecutionContext = ExecutionConte
   readonly pages?: readonly PageDefinition[];
   readonly permissions?: readonly string[];
   readonly events?: readonly EventDefinition<unknown>[];
-  readonly consumers?: readonly ConsumerDefinition<unknown>[];
+  readonly consumers?: readonly ConsumerDefinition<unknown, unknown>[];
   readonly adapters?: readonly AdapterInstance<AdapterOperations>[];
   readonly tests?: readonly string[];
 }): FeatureRegistration<TContext> {

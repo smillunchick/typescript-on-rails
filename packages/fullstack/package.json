@@ -12,6 +12,10 @@
   "bin": { "tor-lifecycle": "./dist/bin.js" },
   "exports": {
     ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./application-lifecycle": {
+      "types": "./dist/application-lifecycle.d.ts",
+      "import": "./dist/application-lifecycle.js"
+    },
     "./application-loader": {
       "types": "./dist/application-loader.d.ts",
       "import": "./dist/application-loader.js",
@@ -28,7 +32,7 @@
     "prepack": "npm run build"
   },
   "dependencies": { "tsx": "4.20.6" },
-  "peerDependencies": { "typescript-on-rails": "0.1.0" },
+  "peerDependencies": { "typescript-on-rails": "^0.1.0" },
   "devDependencies": { "@types/node": "^24.10.0", "typescript": "5.9.3", "typescript-on-rails": "file:../.." },
   "engines": { "node": ">=22" },
   "license": "MIT"

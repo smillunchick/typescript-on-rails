@@ -4,23 +4,21 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "app dev",
-    "build": "app build",
-    "test": "app test",
+    "dev": "node ../../dist/bin.js dev",
+    "build": "node ../../dist/bin.js build",
+    "test": "node ../../dist/bin.js test",
     "precheck": "npm --prefix ../.. run packages:runtime-build",
     "check": "npm run check:architecture",
     "check:architecture": "node ../../dist/bin.js check",
-    "migrate": "app migrate",
-    "worker": "app worker",
-    "scheduler": "app scheduler",
-    "seed": "app seed",
+    "migrate": "node ../../dist/bin.js migrate",
+    "worker": "node ../../dist/bin.js worker",
+    "scheduler": "node ../../dist/bin.js scheduler",
+    "seed": "node ../../dist/bin.js seed",
     "dev:runtime": "next dev --experimental-https --hostname localhost --port 3420",
     "build:runtime": "next build",
     "test:runtime": "node --import tsx --test test/reference.test.ts",
     "check:runtime": "tsc -p tsconfig.json --noEmit && node --import tsx --test test/reference.test.ts",
     "migrate:runtime": "node --import tsx tools/migrate.ts",
-    "worker:runtime": "node --import tsx tools/worker.ts",
-    "scheduler:runtime": "node --import tsx tools/scheduler.ts",
     "seed:runtime": "node --import tsx tools/seed.ts"
   },
   "dependencies": {
@@ -56,6 +54,19 @@
       "pg": "host-io",
       "react": "ui",
       "react/jsx-runtime": "ui"
-    }
+    },
+    "packageCapabilitiesV2": [
+      { "version": 2, "package": "@typescript-on-rails/fullstack", "packageVersion": "0.1.0", "runtime": ["server", "build"], "effects": ["filesystem", "process"], "nondeterminism": ["environment"] },
+      { "version": 2, "package": "@typescript-on-rails/jobs", "packageVersion": "0.1.0", "runtime": ["server"], "effects": ["database"], "nondeterminism": ["clock", "random"] },
+      { "version": 2, "package": "@typescript-on-rails/postgres", "packageVersion": "0.1.0", "runtime": ["server"], "effects": ["database", "network"], "nondeterminism": ["external"] },
+      { "version": 2, "package": "@typescript-on-rails/testing", "packageVersion": "0.1.0", "runtime": ["server"], "effects": ["database"], "nondeterminism": ["random"] },
+      { "version": 2, "package": "@typescript-on-rails/web", "packageVersion": "0.1.0", "runtime": ["universal", "server"], "effects": ["none"], "nondeterminism": ["none"] },
+      { "version": 2, "package": "kysely", "packageVersion": "0.29.4", "runtime": ["server"], "effects": ["database"], "nondeterminism": ["external"] },
+      { "version": 2, "package": "next", "packageVersion": "16.3.3", "runtime": ["browser", "server", "build"], "effects": ["filesystem", "network", "process"], "nondeterminism": ["environment"] },
+      { "version": 2, "package": "next/headers", "packageVersion": "16.3.3", "runtime": ["server"], "effects": ["none"], "nondeterminism": ["external"] },
+      { "version": 2, "package": "pg", "packageVersion": "8.22.0", "runtime": ["server"], "effects": ["database", "network"], "nondeterminism": ["external"] },
+      { "version": 2, "package": "react", "packageVersion": "19.2.8", "runtime": ["browser", "server"], "effects": ["none"], "nondeterminism": ["none"] },
+      { "version": 2, "package": "react/jsx-runtime", "packageVersion": "19.2.8", "runtime": ["browser", "server"], "effects": ["none"], "nondeterminism": ["none"] }
+    ]
   }
 }

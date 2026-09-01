@@ -107,7 +107,7 @@ const generatedTsconfig = {
   include: ["src/**/*.ts", "test/**/*.ts"],
 };
 
-const generatedPackage = {
+const generatedCorePackage = {
   name: "agent-native-app",
   private: true,
   version: "0.1.0",
@@ -117,6 +117,8 @@ const generatedPackage = {
   },
   scripts: {
     check: "app check",
+    test: "app test",
+    "test:app": "node --test",
     typecheck: "tsc -p tsconfig.json",
   },
   dependencies: {
@@ -127,6 +129,34 @@ const generatedPackage = {
     typescript: "5.9.3",
   },
 };
+
+export type ApplicationProfile = "fullstack" | "core";
+
+export interface ApplicationScaffoldOptions {
+  readonly profile?: ApplicationProfile;
+  readonly fileSystem?: ApplicationScaffoldFileSystem;
+}
+
+function isScaffoldFileSystem(value: ApplicationScaffoldFileSystem | ApplicationScaffoldOptions): value is ApplicationScaffoldFileSystem {
+  return "createDirectory" in value && "createFile" in value && "removePath" in value;
+}
+
+const fullStackTemplateRoot = path.resolve(import.meta.dirname, "../../../templates/fullstack");
+
+async function fullStackTemplateFiles(directory = fullStackTemplateRoot): Promise<ReadonlyArray<readonly [string, string]>> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = (await Promise.all(entries.map(async (entry): Promise<ReadonlyArray<readonly [string, string]>> => {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) return fullStackTemplateFiles(target);
+    if (entry.isFile() && entry.name.endsWith(".tsbuildinfo")) return [];
+    if (entry.isFile()) {
+      const relative = path.relative(fullStackTemplateRoot, target);
+      return [[relative === "gitignore" ? ".gitignore" : relative, await readFile(target, "utf8")]];
+    }
+    return [];
+  }))).flat();
+  return files.sort(([left], [right]) => left.localeCompare(right));
+}
 
 const nodeApplicationScaffoldFileSystem: ApplicationScaffoldFileSystem = {
   async createDirectory(directory) {
@@ -145,35 +175,58 @@ async function rollbackApplicationScaffold(
   root: string,
   rootExisted: boolean,
   createdFiles: readonly string[],
+  createdDirectories: readonly string[],
 ): Promise<void> {
   if (!rootExisted) {
     await fileSystem.removePath(root, true);
     return;
   }
-  for (const file of createdFiles) await fileSystem.removePath(file, false);
-  await fileSystem.removePath(path.join(root, "src"), true);
+  for (const file of [...createdFiles].reverse()) await fileSystem.removePath(file, false);
+  for (const directory of [...createdDirectories].reverse()) await fileSystem.removePath(directory, true);
 }
 
 export async function createApplication(
   cwd: string,
   target: string,
-  fileSystem: ApplicationScaffoldFileSystem = nodeApplicationScaffoldFileSystem,
+  options: ApplicationScaffoldFileSystem | ApplicationProfile | ApplicationScaffoldOptions = {},
 ): Promise<GenerationResult> {
+  const fileSystem = typeof options === "string"
+    ? nodeApplicationScaffoldFileSystem
+    : isScaffoldFileSystem(options)
+      ? options
+      : options.fileSystem ?? nodeApplicationScaffoldFileSystem;
+  const selectedProfile = typeof options === "string"
+    ? options
+    : isScaffoldFileSystem(options)
+      ? "fullstack"
+      : options.profile ?? "fullstack";
   const root = safeTarget(cwd, target);
   const rootExisted = await exists(root);
   if (rootExisted) {
     await assertOrdinaryDirectory(root);
     if ((await readdir(root)).length > 0) throw new Error(`Target directory is not empty: ${target}`);
   }
-  const files: ReadonlyArray<readonly [string, string]> = [
-    ["package.json", `${JSON.stringify(generatedPackage, null, 2)}\n`],
-    ["tsconfig.json", `${JSON.stringify(generatedTsconfig, null, 2)}\n`],
-    ["src/app.ts", `import { defineApp } from "typescript-on-rails";\n\nexport default defineApp();\n`],
-  ];
+  const files: ReadonlyArray<readonly [string, string]> = selectedProfile === "core"
+    ? [
+        ["package.json", `${JSON.stringify(generatedCorePackage, null, 2)}\n`],
+        ["tsconfig.json", `${JSON.stringify(generatedTsconfig, null, 2)}\n`],
+        ["src/app.ts", `import { defineApp } from "typescript-on-rails";\n\nexport default defineApp();\n`],
+      ]
+    : await fullStackTemplateFiles();
+  const directories = new Set<string>(selectedProfile === "core" ? [path.join(root, "src", "features")] : []);
+  for (const [relative] of files) {
+    const directory = path.dirname(path.join(root, relative));
+    if (directory !== root) directories.add(directory);
+  }
+  const orderedDirectories = [...directories].sort((left, right) => left.length - right.length || left.localeCompare(right));
   const createdFiles: string[] = [];
+  const createdDirectories: string[] = [];
   try {
     if (!rootExisted) await fileSystem.createDirectory(root);
-    await fileSystem.createDirectory(path.join(root, "src", "features"));
+    for (const directory of orderedDirectories) {
+      createdDirectories.push(directory);
+      await fileSystem.createDirectory(directory);
+    }
     for (const [relative, content] of files) {
       const file = path.join(root, relative);
       createdFiles.push(file);
@@ -181,7 +234,7 @@ export async function createApplication(
     }
   } catch (error) {
     try {
-      await rollbackApplicationScaffold(fileSystem, root, rootExisted, createdFiles);
+      await rollbackApplicationScaffold(fileSystem, root, rootExisted, createdFiles, createdDirectories);
     } catch (rollbackError) {
       throw new AggregateError([error, rollbackError], `Application scaffold failed and rollback was incomplete: ${target}`);
     }

@@ -2,7 +2,7 @@ import { architecture } from "./architecture.js";
 import { Forbidden, InvalidInput, normalizeError } from "./errors.js";
 import { object, type Infer, type ObjectOutput, type Schema, type SchemaFields, type SchemaMetadata } from "./schema.js";
 import { isSchema, normalizeSchema } from "./schema-protocol.js";
-import type { ExecutionContext } from "./executable.js";
+import type { Executable, ExecutionContext } from "./executable.js";
 
 architecture.allow({
   rule: "boring-typescript",
@@ -35,6 +35,7 @@ export interface RouteMetadata {
 
 export interface RouteDefinition<TInput, TResult, TContext extends ExecutionContext> {
   readonly metadata: RouteMetadata;
+  readonly operation?: Executable<TInput, TResult, TContext>;
   execute(input: unknown, context: TContext): Promise<TResult>;
 }
 
@@ -92,4 +93,31 @@ export function route<
       }
     },
   };
+}
+
+export function operationRoute<
+  TInput,
+  TResult,
+  TContext extends ExecutionContext = ExecutionContext,
+>(definition: {
+  readonly method: RouteMethod;
+  readonly path: string;
+  readonly operation: Executable<TInput, TResult, TContext>;
+}): RouteDefinition<TInput, TResult, TContext> {
+  if (!definition.path.startsWith("/")) throw new InvalidInput("A route needs an absolute path");
+  const access = definition.operation.metadata.access;
+  const metadata: RouteMetadata = {
+    kind: "route",
+    method: definition.method,
+    path: definition.path,
+    input: definition.operation.metadata.input,
+    ...(definition.operation.metadata.output === undefined ? {} : { output: definition.operation.metadata.output }),
+    access: access.type,
+    ...(access.type === "permission" ? { permission: access.permission } : {}),
+  };
+  return Object.freeze({
+    metadata: Object.freeze(metadata),
+    operation: definition.operation,
+    execute: (input: unknown, context: TContext) => definition.operation.execute(input, context),
+  });
 }

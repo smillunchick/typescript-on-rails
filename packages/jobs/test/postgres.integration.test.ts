@@ -10,6 +10,7 @@ import {
   durableEvent,
   jobsMigration,
   postgresJobStore,
+  withPostgresRequestUnitOfWork,
   type JobDatabase,
   type JobHandlerContext,
 } from "../src/index.js";
@@ -160,6 +161,48 @@ describe("PostgreSQL durable work", () => {
         assert.equal(replayedEffectJob.replayed, false);
         assert.equal(await firstWorker.runOnce(new AbortController().signal), "succeeded");
         assert.equal(effects, 1);
+      } finally {
+        await database.close();
+      }
+    },
+  );
+
+  it(
+    "commits business state and outbox together or rolls both back",
+    { skip: connectionString === undefined },
+    async () => {
+      interface RequestDatabase extends JobDatabase {
+        projects: { id: string; tenant_id: string; name: string };
+      }
+      const database = await createTestDatabase<RequestDatabase>(connectionString ?? "");
+      try {
+        await migrateToLatest(database.db, [{ name: "001_jobs", up: jobsMigration.up }]);
+        await database.db.schema
+          .createTable("projects")
+          .addColumn("id", "varchar(80)", (column) => column.primaryKey())
+          .addColumn("tenant_id", "varchar(80)", (column) => column.notNull())
+          .addColumn("name", "varchar(200)", (column) => column.notNull())
+          .execute();
+        const ProjectCreated = durableEvent({ name: "ProjectCreated", parse: (value: unknown) => value });
+        const request = { tenantId: "tenant_one", actorId: "actor_one", requestId: "request_one" };
+
+        await assert.rejects(
+          withPostgresRequestUnitOfWork(database, request, async (unit) => {
+            await unit.transaction.insertInto("projects").values({ id: "rolled_back", tenant_id: "tenant_one", name: "No" }).execute();
+            await unit.outbox.appendOutbox(ProjectCreated, { projectId: "rolled_back" }, "project:rolled_back");
+            throw new Error("ROLL_BACK_REQUEST");
+          }),
+          /ROLL_BACK_REQUEST/,
+        );
+        assert.equal((await database.db.selectFrom("projects").select("id").execute()).length, 0);
+        assert.equal((await database.db.selectFrom("tor_outbox").select("id").execute()).length, 0);
+
+        await withPostgresRequestUnitOfWork(database, request, async (unit) => {
+          await unit.transaction.insertInto("projects").values({ id: "committed", tenant_id: "tenant_one", name: "Yes" }).execute();
+          await unit.outbox.appendOutbox(ProjectCreated, { projectId: "committed" }, "project:committed");
+        });
+        assert.equal((await database.db.selectFrom("projects").select("id").execute()).length, 1);
+        assert.equal((await database.db.selectFrom("tor_outbox").select("id").execute()).length, 1);
       } finally {
         await database.close();
       }

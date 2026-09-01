@@ -7,16 +7,21 @@ import {
   action,
   adaptSchema,
   boolean,
+  consumer,
   createEventBus,
   defineAdapterContract,
   defineApp,
+  defineFeature,
   defineModel,
   event,
   implementAdapter,
   object,
+  operationRoute,
   query,
   route,
+  runtimeBinding,
   string,
+  entrypoint,
 } from "../src/index.js";
 
 describe("adapters and app configuration", () => {
@@ -229,6 +234,75 @@ describe("adapters and app configuration", () => {
     assert.deepEqual(SharedEvent.metadata.payload, shared.metadata);
     assert.deepEqual(SharedAdapter.metadata.operations.send?.input, shared.metadata);
     assert.deepEqual(sharedAdapter.metadata.operations.send?.input, shared.metadata);
+  });
+
+  it("compiles identity-verified runtime links from the exact registered objects", () => {
+    const createProject = action({
+      input: object({ id: string() }),
+      permission: "project.create",
+      run: ({ id }) => ({ id }),
+    });
+    const createProjectRoute = operationRoute({
+      method: "POST",
+      path: "/projects",
+      operation: createProject,
+    });
+    const ProjectCreated = event({ name: "ProjectCreated", payload: object({ id: string() }) });
+    const projectCreatedConsumer = consumer({
+      name: "sendProjectWelcome",
+      event: ProjectCreated,
+      durable: true,
+      handle: () => undefined,
+    });
+    const feature = defineFeature({
+      name: "projects",
+      operations: { createProject },
+      routes: [createProjectRoute],
+      events: [ProjectCreated],
+      consumers: [projectCreatedConsumer],
+    });
+    const webBinding = runtimeBinding({
+      name: "projects.create",
+      protocol: "web.route/v1",
+      process: "web",
+      target: createProjectRoute,
+    });
+    const workerBinding = runtimeBinding({
+      name: "projects.sendProjectWelcome",
+      protocol: "jobs.consumer/v1",
+      process: "worker",
+      target: projectCreatedConsumer,
+    });
+    const app = defineApp({
+      features: [feature],
+      entrypoints: {
+        web: entrypoint({ name: "web", process: "web", bindings: [webBinding], run: () => undefined }),
+        worker: entrypoint({ name: "worker", process: "worker", bindings: [workerBinding], run: () => undefined }),
+      },
+    });
+
+    assert.equal(app.graph.routes[0]?.definition, createProjectRoute);
+    assert.equal(app.graph.consumers[0]?.definition, projectCreatedConsumer);
+    assert.deepEqual(app.graph.links.map(({ kind }) => kind), [
+      "consumer-event",
+      "entrypoint-consumer",
+      "entrypoint-route",
+      "route-operation",
+    ]);
+    assert.throws(
+      () => defineApp({
+        features: [feature],
+        entrypoints: {
+          web: entrypoint({
+            name: "invalid",
+            process: "web",
+            bindings: [runtimeBinding({ name: "invalid", protocol: "web.route/v1", process: "web", target: {} })],
+            run: () => undefined,
+          }),
+        },
+      }),
+      /UNREGISTERED_RUNTIME_BINDING_TARGET/,
+    );
   });
 
   it("preserves explicit adapter configuration in an app", () => {

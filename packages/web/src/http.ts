@@ -1,3 +1,5 @@
+type MaybePromise<T> = T | Promise<T>;
+
 export type CachePolicy = "no-store" | { readonly publicSeconds: number } | { readonly privateSeconds: number };
 export interface HttpFile {
   readonly field: string;
@@ -27,10 +29,11 @@ export interface HttpHandlerOptions<TContext extends HttpContext, TOutput> {
   readonly path: string;
   readonly maximumBodyBytes?: number;
   readonly cache?: CachePolicy;
+  readonly guard?: (request: Request) => MaybePromise<void>;
   readonly context: (request: Request) => Promise<TContext> | TContext;
   readonly authorize?: (input: HttpInput, context: TContext) => Promise<boolean> | boolean;
   readonly handle: (input: HttpInput, context: TContext) => Promise<TOutput> | TOutput;
-  readonly respond?: (output: TOutput) => Response;
+  readonly respond?: (output: TOutput) => MaybePromise<Response>;
   readonly observe?: HttpObservation;
 }
 
@@ -159,11 +162,12 @@ export function defineHttpHandler<TContext extends HttpContext, TOutput>(options
       const observation = options.observe?.start(options.name, request);
       try {
         if (request.method.toUpperCase() !== method) throw new HttpError(405, "METHOD_NOT_ALLOWED", "Method not allowed");
+        await options.guard?.(request);
         const context = await options.context(request);
         const input = await requestInput(request, options.maximumBodyBytes ?? 1024 * 1024, params);
         if (options.authorize !== undefined && !(await options.authorize(input, context))) throw new HttpError(403, "FORBIDDEN", "Access forbidden");
         const output = await options.handle(input, context);
-        const response = options.respond?.(output) ?? Response.json(output);
+        const response = await options.respond?.(output) ?? Response.json(output);
         const headers = new Headers(response.headers);
         for (const [name, value] of Object.entries(secureHeaders())) if (!headers.has(name)) headers.set(name, value);
         headers.set("Cache-Control", cacheHeader(options.cache));
@@ -230,6 +234,14 @@ export function requireTrustedMutation(input: {
     !/^[A-Za-z0-9_-]{32,256}$/.test(input.csrfCookie) ||
     !equal(input.csrfCookie, input.csrfValue)
   ) throw new HttpError(403, "CSRF_INVALID", "CSRF proof is invalid");
+}
+
+export function requestCookie(request: Request, name: string): string | undefined {
+  for (const item of (request.headers.get("cookie") ?? "").split(";")) {
+    const index = item.indexOf("=");
+    if (index > 0 && item.slice(0, index).trim() === name) return item.slice(index + 1).trim();
+  }
+  return undefined;
 }
 
 export function cookie(name: string, value: string, options: { readonly httpOnly?: boolean; readonly secure?: boolean; readonly sameSite?: "Strict" | "Lax"; readonly maxAgeSeconds?: number } = {}): string {

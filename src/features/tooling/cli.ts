@@ -1,4 +1,4 @@
-import { architecture } from "../runtime/index.js";
+import { architecture, runtimeRecordId } from "../runtime/index.js";
 import {
   analyzeApplication,
   analyzeApplicationV3,
@@ -6,6 +6,7 @@ import {
   type AnalyzeApplicationV3Options,
   type ArchitectureManifest,
   type ArchitectureManifestV3,
+  type ComposedSemanticRecord,
 } from "../architecture/index.js";
 import {
   assertManifestV2,
@@ -35,6 +36,7 @@ import {
   resolveFullStackLifecycleBin,
   runProjectCommand,
   validateGitRef,
+  type ApplicationProfile,
   type GenerationResult,
 } from "../../infra/project/index.js";
 
@@ -51,6 +53,8 @@ export interface CommandInvocation {
   readonly command: string;
   readonly args: readonly string[];
   readonly cwd: string;
+  readonly stdio?: "inherit" | "stderr";
+  readonly signal?: AbortSignal;
 }
 
 export type CommandRunner = (invocation: CommandInvocation) => Promise<number> | number;
@@ -59,6 +63,7 @@ export interface CliDependencies {
   readonly cwd?: string;
   readonly stdout?: CliStream;
   readonly stderr?: CliStream;
+  readonly signal?: AbortSignal;
   readonly runCommand?: CommandRunner;
   readonly resolveFullStackLifecycle?: (root: string) => string;
   readonly loadFullStackApplication?: (
@@ -70,6 +75,7 @@ export interface CliDependencies {
   readonly createApplication?: (
     cwd: string,
     target: string,
+    profile?: ApplicationProfile,
   ) => Promise<{ readonly created: readonly string[]; readonly unchanged: readonly string[] }>;
 }
 
@@ -80,7 +86,7 @@ Official modular packages provide web, PostgreSQL, durable work, lifecycle, and 
 Core-only applications keep the legacy lifecycle delegation path.
 
 Commands:
-  new <directory>
+  new <directory> [--core]
   dev | build | test | migrate | worker | scheduler | seed
   check [--json] [--with-tests]
   create feature <name>
@@ -131,12 +137,16 @@ async function lifecycle(
   stderr: CliStream,
   runCommand: CommandRunner,
   resolveLifecycle: (root: string) => string,
+  stdio: "inherit" | "stderr" = "inherit",
+  signal?: AbortSignal,
 ): Promise<number> {
   if (await hasFullStackLifecycle(cwd)) {
     return runCommand({
       command: process.execPath,
       args: [resolveLifecycle(cwd), command],
       cwd,
+      ...(stdio === "inherit" ? {} : { stdio }),
+      ...(signal === undefined ? {} : { signal }),
     });
   }
   const script = `${command}:app`;
@@ -144,7 +154,7 @@ async function lifecycle(
     stderr.write(`Missing full-stack lifecycle or legacy app-owned script "${script}" for ${command}.\n`);
     return 1;
   }
-  return runCommand({ command: "npm", args: ["run", script], cwd });
+  return runCommand({ command: "npm", args: ["run", script], cwd, ...(stdio === "inherit" ? {} : { stdio }), ...(signal === undefined ? {} : { signal }) });
 }
 
 async function runCheck(
@@ -155,34 +165,48 @@ async function runCheck(
   analyze: (root: string) => ArchitectureManifest,
   runCommand: CommandRunner,
   resolveLifecycle: (root: string) => string,
+  signal?: AbortSignal,
 ): Promise<number> {
   onlyFlags(args, ["--json", "--with-tests"]);
   const asJson = oneFlag(args, "--json");
   const withTests = oneFlag(args, "--with-tests");
   const manifest = analyze(cwd);
   assertManifestV2(manifest);
+  const cancelled = (): boolean => {
+    if (signal?.aborted !== true) return false;
+    stderr.write("Command cancelled.\n");
+    if (asJson) json(stdout, { ok: false, diagnostics: manifest.diagnostics, cancelled: true });
+    return true;
+  };
+  if (cancelled()) return 130;
   const errors = manifest.diagnostics.filter((entry) => entry.severity === "error");
   for (const entry of manifest.diagnostics) stderr.write(`${formatArchitectureDiagnostic(entry)}\n`);
   if (errors.length > 0) {
     if (asJson) json(stdout, { ok: false, diagnostics: manifest.diagnostics });
     return 1;
   }
-  if (await hasFullStackLifecycle(cwd)) {
-    const fullStackCode = await lifecycle("check", cwd, stderr, runCommand, resolveLifecycle);
+  const fullStack = await hasFullStackLifecycle(cwd);
+  if (fullStack) {
+    const fullStackCode = await lifecycle("check", cwd, stderr, runCommand, resolveLifecycle, asJson ? "stderr" : "inherit", signal);
+    if (cancelled()) return 130;
     if (fullStackCode !== 0) {
-      if (asJson) json(stdout, { ok: false, diagnostics: [], fullStack: { ok: false, exitCode: fullStackCode } });
+      if (asJson) json(stdout, { ok: false, diagnostics: manifest.diagnostics, fullStack: { ok: false, exitCode: fullStackCode } });
       return fullStackCode;
     }
   }
   if (withTests) {
-    const testCode = await runCommand({ command: "npm", args: ["run", "test:app"], cwd });
+    const testCode = fullStack
+      ? await lifecycle("test", cwd, stderr, runCommand, resolveLifecycle, asJson ? "stderr" : "inherit", signal)
+      : await runCommand({ command: "npm", args: ["run", "test:app"], cwd, ...(asJson ? { stdio: "stderr" as const } : {}), ...(signal === undefined ? {} : { signal }) });
+    if (cancelled()) return 130;
     if (testCode !== 0) {
       stderr.write(`Application tests failed with exit code ${String(testCode)}.\n`);
-      if (asJson) json(stdout, { ok: false, diagnostics: [], tests: { ok: false, exitCode: testCode } });
+      if (asJson) json(stdout, { ok: false, diagnostics: manifest.diagnostics, tests: { ok: false, exitCode: testCode } });
       return testCode;
     }
   }
-  if (asJson) json(stdout, { ok: true, diagnostics: [] });
+  if (cancelled()) return 130;
+  if (asJson) json(stdout, { ok: true, diagnostics: manifest.diagnostics });
   else stdout.write("app check passed.\n");
   return 0;
 }
@@ -331,6 +355,78 @@ async function v3Manifest(
   return analyzeApplicationV3(cwd, application === undefined ? {} : { application });
 }
 
+function compositionId(record: ComposedSemanticRecord): string | undefined {
+  if (record.kind === "operation" || record.kind === "route" || record.kind === "event" || record.kind === "consumer") {
+    return runtimeRecordId(record.kind, record.owner, record.name);
+  }
+  if (record.kind === "entrypoint") return runtimeRecordId("entrypoint", "application", record.name);
+  return undefined;
+}
+
+function linkedProjection(manifest: ArchitectureManifestV3, selector: string, trace: boolean) {
+  const selected = manifest.composition.filter(({ owner, name }) => owner === selector || name === selector);
+  const seedIds = new Set(selected.map(compositionId).filter((id): id is string => id !== undefined));
+  if (trace) {
+    const eventNames = new Set<string>();
+    for (const record of selected) {
+      if (!Array.isArray(record.detail?.calls)) continue;
+      for (const call of record.detail.calls) {
+        if (typeof call === "object" && call !== null && "event" in call && typeof call.event === "string") eventNames.add(call.event);
+      }
+    }
+    for (const event of manifest.composition.filter(({ kind, name }) => kind === "event" && eventNames.has(name))) {
+      const id = compositionId(event);
+      if (id !== undefined) seedIds.add(id);
+    }
+  }
+  const ids = new Set(seedIds);
+  if (trace) {
+    type Link = ArchitectureManifestV3["linkage"]["links"][number];
+    const incoming = new Map<string, Link[]>();
+    const outgoing = new Map<string, Link[]>();
+    for (const link of manifest.linkage.links) {
+      const incomingLinks = incoming.get(link.to) ?? [];
+      incomingLinks.push(link);
+      incoming.set(link.to, incomingLinks);
+      const outgoingLinks = outgoing.get(link.from) ?? [];
+      outgoingLinks.push(link);
+      outgoing.set(link.from, outgoingLinks);
+    }
+    const queue = [...seedIds];
+    for (let index = 0; index < queue.length; index += 1) {
+      const id = queue[index];
+      if (id === undefined) continue;
+      for (const link of incoming.get(id) ?? []) {
+        if (ids.has(link.from)) continue;
+        ids.add(link.from);
+        queue.push(link.from);
+      }
+      if (id.startsWith("entrypoint/") && !seedIds.has(id)) continue;
+      for (const link of outgoing.get(id) ?? []) {
+        if (ids.has(link.to)) continue;
+        ids.add(link.to);
+        queue.push(link.to);
+      }
+    }
+  } else {
+    for (const link of manifest.linkage.links) {
+      if (!seedIds.has(link.from) && !seedIds.has(link.to)) continue;
+      ids.add(link.from);
+      ids.add(link.to);
+    }
+  }
+  const links = manifest.linkage.links.filter(({ from, to }) => ids.has(from) && ids.has(to) && (trace || seedIds.has(from) || seedIds.has(to)));
+  const records = manifest.composition.filter((record) => {
+    const id = compositionId(record);
+    return selected.includes(record) || (id !== undefined && ids.has(id));
+  });
+  return { records, links };
+}
+
+function completenessSummary(manifest: ArchitectureManifestV3) {
+  return Object.freeze({ complete: manifest.completeness.complete, counts: manifest.completeness.counts });
+}
+
 async function renderV3Projection(
   command: "manifest" | "brief" | "trace" | "tests-for" | "unknowns",
   args: readonly string[],
@@ -351,36 +447,56 @@ async function renderV3Projection(
   const positional = args.filter((entry) => entry !== "--json");
   if (command === "unknowns") {
     if (positional.length > 0) throw new CliUsageError("unknowns accepts only --json");
-    const values = manifest.completeness.observations.filter(({ category }) => category !== "declared");
-    if (asJson) json(stdout, { completeness: manifest.completeness, unknowns: values });
-    else stdout.write(formatList(values));
+    const unknowns = manifest.completeness.observations.filter(({ category }) => category !== "declared");
+    const value = { ...completenessSummary(manifest), unknowns };
+    if (asJson) json(stdout, value); else stdout.write(formatList(unknowns));
     return 0;
   }
   const selector = positional[0];
   if (selector === undefined || positional.length !== 1) throw new CliUsageError(`Expected ${command} <selector>`);
+  const projection = linkedProjection(manifest, selector, command === "trace");
+  const owners = new Set(projection.records.map(({ owner }) => owner).filter((owner) => owner !== "application"));
+  const dependencies = manifest.base.dependencies.filter(({ from, to }) => owners.has(from) || owners.has(to));
   if (command === "brief") {
-    const features = manifest.base.features.filter(({ name }) => name === selector);
-    const composition = manifest.composition.filter(({ owner, name }) => owner === selector || name === selector);
-    const dependencies = manifest.base.dependencies.filter(({ from, to }) => from === selector || to === selector);
-    const value = { selector, features, composition, dependencies, completeness: manifest.completeness, sourceBodiesIncluded: false, contextBenefitClaim: false };
-    if (asJson) json(stdout, value); else stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-    return features.length > 0 || composition.length > 0 ? 0 : 1;
+    const value = {
+      version: 2,
+      selector,
+      records: projection.records,
+      links: projection.links,
+      dependencies,
+      completeness: completenessSummary(manifest),
+      sourceBodiesIncluded: false,
+      contextBenefitClaim: false,
+    };
+    if (asJson) json(stdout, value); else stdout.write(`${projection.records.map(({ kind, owner, name }) => `${kind} ${owner}.${name}`).join("\n")}\n`);
+    return projection.records.length > 0 ? 0 : 1;
   }
   if (command === "tests-for") {
-    const owners = new Set(manifest.composition.filter(({ owner, name }) => owner === selector || name === selector).map(({ owner }) => owner));
     if (manifest.base.features.some(({ name }) => name === selector)) owners.add(selector);
-    const tests = manifest.composition.filter(({ kind, owner }) => kind === "test" && owners.has(owner)).map(({ name }) => name).sort();
-    if (asJson) json(stdout, { selector, tests, completeness: manifest.completeness }); else stdout.write(formatList(tests));
-    return 0;
+    const missing = new Set(manifest.completeness.observations.filter(({ kind }) => kind === "test-source").map(({ name }) => name));
+    const tests = manifest.composition
+      .filter(({ kind, owner }) => kind === "test" && owners.has(owner))
+      .map(({ owner, name }) => ({ file: name, owner, verification: missing.has(name) ? "missing" : "source-exists" }))
+      .sort((left, right) => left.file.localeCompare(right.file));
+    if (asJson) json(stdout, { selector, tests, completeness: completenessSummary(manifest) });
+    else stdout.write(formatList(tests.map(({ file, verification }) => `${file} (${verification})`)));
+    return tests.some(({ verification }) => verification === "missing") ? 1 : 0;
   }
-  const records = [
-    ...manifest.base.operations.filter(({ name }) => name === selector),
-    ...manifest.base.routes.filter(({ name, path }) => name === selector || path === selector),
-  ];
-  const owners = new Set(records.map(({ feature }) => feature).filter((feature): feature is string => feature !== null));
-  const value = { selector, records, dependencies: manifest.base.dependencies.filter(({ from, to }) => owners.has(from) || owners.has(to)), completeness: manifest.completeness, runtimeTraceAvailable: false };
-  if (asJson) json(stdout, value); else stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-  return records.length > 0 ? 0 : 1;
+  const calls = projection.records.flatMap((record) => Array.isArray(record.detail?.calls) ? record.detail.calls : []);
+  const value = {
+    version: 1,
+    selector,
+    traceKind: "verified-static-linkage",
+    records: projection.records,
+    links: projection.links,
+    calls,
+    dependencies,
+    completeness: completenessSummary(manifest),
+    staticTraceAvailable: projection.links.length > 0,
+    runtimeTraceAvailable: false,
+  };
+  if (asJson) json(stdout, value); else stdout.write(formatList(projection.links.map(({ kind, from, to }) => `${kind}: ${from} -> ${to}`)));
+  return projection.records.length > 0 ? 0 : 1;
 }
 
 function parseDiff(args: readonly string[]): { readonly base: string; readonly asJson: boolean } {
@@ -432,6 +548,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
   const cwd = dependencies.cwd ?? process.cwd();
   const stdout = dependencies.stdout ?? process.stdout;
   const stderr = dependencies.stderr ?? process.stderr;
+  const signal = dependencies.signal;
   const runCommand = dependencies.runCommand ?? runProjectCommand;
   const resolveLifecycle = dependencies.resolveFullStackLifecycle ?? resolveFullStackLifecycleBin;
   const loadApplication =
@@ -447,15 +564,18 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
     const rest = args.slice(1);
     if (command === undefined) throw new CliUsageError("Missing command");
     if (command === "new") {
-      if (rest.length !== 1 || rest[0] === undefined) throw new CliUsageError("Expected new <directory>");
-      renderGeneration(stdout, await scaffoldApplication(cwd, rest[0]));
+      if ((rest.length !== 1 && rest.length !== 2) || rest[0] === undefined || (rest.length === 2 && rest[1] !== "--core")) {
+        throw new CliUsageError("Expected new <directory> [--core]");
+      }
+      renderGeneration(stdout, await scaffoldApplication(cwd, rest[0], rest[1] === "--core" ? "core" : "fullstack"));
       return 0;
     }
     if (command === "dev" || command === "build" || command === "test" || command === "migrate" || command === "worker" || command === "scheduler" || command === "seed") {
       if (rest.length !== 0) throw new CliUsageError(`Unexpected arguments for ${command}`);
-      return await lifecycle(command, cwd, stderr, runCommand, resolveLifecycle);
+      const code = await lifecycle(command, cwd, stderr, runCommand, resolveLifecycle, "inherit", signal);
+      return signal?.aborted === true ? 130 : code;
     }
-    if (command === "check") return await runCheck(rest, cwd, stdout, stderr, analyze, runCommand, resolveLifecycle);
+    if (command === "check") return await runCheck(rest, cwd, stdout, stderr, analyze, runCommand, resolveLifecycle, signal);
     if (command === "create") return await runCreate(rest, cwd, stdout);
     if (command === "explain") return runExplain(rest, inspect(cwd), stdout, stderr);
     if (command === "graph") return runGraph(rest, inspect(cwd), stdout);
@@ -475,12 +595,21 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
     }
     throw new CliUsageError(`Unknown command: ${command}`);
   } catch (error) {
+    const asJson = args.includes("--json");
     if (isUsageFailure(error)) {
+      if (asJson) json(stdout, { ok: false, error: { name: "CliUsageError", code: "INVALID_USAGE", message: error instanceof Error ? error.message : "Invalid command usage" } });
       stderr.write(`${usage}${error instanceof Error ? `\n${error.message}\n` : ""}`);
       return 2;
     }
     const typedError = compatibilityError(error);
-    if (typedError !== null && args.includes("--json")) json(stdout, { ok: false, error: typedError });
+    if (asJson) json(stdout, {
+      ok: false,
+      error: typedError ?? {
+        name: error instanceof Error ? error.name : "Error",
+        code: "COMMAND_FAILED",
+        message: formatCliError(error),
+      },
+    });
     stderr.write(`${formatCliError(error)}\n`);
     return 1;
   }

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { defineApp, entrypoint } from "typescript-on-rails";
 
+import { applicationLifecyclePlugin } from "../src/application-lifecycle.js";
 import {
   ExecutionTrace,
   LifecycleRegistry,
@@ -12,8 +14,10 @@ import {
   localStorageAdapter,
   memoryObservability,
   parseConfig,
+  processEntrypoint,
   secretReference,
   semanticBrief,
+  sanitizeAttributes,
   testsFor,
   unknowns,
 } from "../src/index.js";
@@ -39,6 +43,41 @@ describe("full-stack application services", () => {
     assert.deepEqual(calls, ["database", "application"]);
     assert.deepEqual(result.plugins, calls);
     await assert.rejects(() => registry.run("worker", { cwd: ".", environment: {}, signal: new AbortController().signal, write: () => undefined }), /NOT_CONFIGURED/);
+  });
+
+  it("runs the exact registered entrypoints and supervises development plugins concurrently", async () => {
+    const calls: string[] = [];
+    const application = defineApp({
+      entrypoints: {
+        web: entrypoint({ name: "web", process: "web", run: () => { calls.push("web"); } }),
+        worker: entrypoint({ name: "worker", process: "worker", run: () => { calls.push("worker"); } }),
+        scheduler: entrypoint({ name: "scheduler", process: "scheduler", run: () => { calls.push("scheduler"); } }),
+      },
+    });
+    const registry = new LifecycleRegistry([
+      applicationLifecyclePlugin({ load: async () => application }),
+    ]);
+    await registry.run("worker", { cwd: ".", environment: {}, signal: new AbortController().signal, write: () => undefined });
+    assert.deepEqual(calls, ["worker"]);
+    calls.length = 0;
+    await registry.run("dev", { cwd: ".", environment: {}, signal: new AbortController().signal, write: () => undefined });
+    assert.deepEqual(calls.sort(), ["scheduler", "web", "worker"]);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const starts: string[] = [];
+    const concurrent = new LifecycleRegistry([
+      lifecyclePlugin({ name: "first", commands: { dev: async () => { starts.push("first"); await Promise.race([gate, new Promise((_, reject) => setTimeout(() => reject(new Error("DEV_NOT_CONCURRENT")), 50))]); } } }),
+      lifecyclePlugin({ name: "second", commands: { dev: () => { starts.push("second"); release(); } } }),
+    ]);
+    await concurrent.run("dev", { cwd: ".", environment: {}, signal: new AbortController().signal, write: () => undefined });
+    assert.deepEqual(starts, ["first", "second"]);
+
+    const controller = new AbortController();
+    const child = processEntrypoint({ name: "child", process: "web", command: process.execPath, args: ["-e", "setInterval(() => undefined, 1000)"] });
+    const running = Promise.resolve(child.run(controller.signal));
+    setTimeout(() => controller.abort(new Error("test stop")), 100);
+    await assert.doesNotReject(running);
   });
 
   it("provides deterministic local adapters with replay and expiry behavior", async () => {
@@ -91,17 +130,28 @@ describe("full-stack application services", () => {
     const unicodeA = { ...manifest, composition: [{ kind: "feature", owner: "billing", name: "billing", detail: { "é": 1, "é": 2 } }] };
     const unicodeB = { ...manifest, composition: [{ kind: "feature", owner: "billing", name: "billing", detail: { "é": 2, "é": 1 } }] };
     assert.equal(semanticBrief(unicodeA, ["billing"]).sha256, semanticBrief(unicodeB, ["billing"]).sha256);
-    assert.deepEqual(testsFor(manifest, "refund"), ["test/refund.test.ts"]);
+    assert.deepEqual(testsFor(manifest, "refund"), [{ file: "test/refund.test.ts", owner: "billing", verification: "declared-only" }]);
+    assert.deepEqual(testsFor(manifest, "refund", { exists: () => true }), [{ file: "test/refund.test.ts", owner: "billing", verification: "source-exists" }]);
     assert.equal(unknowns(manifest).length, 1);
   });
 
-  it("records safe telemetry and request or operation traces", async () => {
+  it("redacts unsafe telemetry attributes and records request or operation traces", async () => {
     const telemetry = memoryObservability();
-    telemetry.logger.info("ready", { port: 3411 });
+    telemetry.logger.info("ready", { port: 3411, authorization: "Bearer live-secret", note: "x".repeat(300) });
     telemetry.metrics.increment("requests");
     const trace = new ExecutionTrace();
     assert.equal(await trace.capture("operation", "billing.read", () => 1, { now: () => 5 }), 1);
     assert.equal(telemetry.records.length, 2);
+    assert.deepEqual(sanitizeAttributes({ authorization: "Bearer live-secret", note: "x".repeat(300), safe: "visible" }), {
+      authorization: "[redacted]",
+      note: `${"x".repeat(255)}…`,
+      safe: "visible",
+    });
+    assert.deepEqual(telemetry.records[0]?.attributes, {
+      port: 3411,
+      authorization: "[redacted]",
+      note: `${"x".repeat(255)}…`,
+    });
     assert.deepEqual(trace.records()[0], { kind: "operation", name: "billing.read", startedAt: 5, endedAt: 5, outcome: "success" });
   });
 });

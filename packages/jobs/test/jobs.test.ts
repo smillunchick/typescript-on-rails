@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { consumer, defineFeature, event, object, string } from "typescript-on-rails";
 
 import {
+  createConsumerRuntime,
   createWorker,
   dispatchOutbox,
   durableEvent,
@@ -270,6 +272,31 @@ describe("durable work runtime", () => {
       dispatchOutbox(fencedStore, { publish: async () => undefined }, { now: () => new Date(200) }),
       { code: "OUTBOX_FENCE_LOST" },
     );
+  });
+
+  it("dispatches outbox work through the exact registered consumer", async () => {
+    const ProjectCreated = event({ name: "ProjectCreated", payload: object({ projectId: string() }) });
+    const received: string[] = [];
+    const welcome = consumer({
+      name: "sendWelcome",
+      event: ProjectCreated,
+      durable: true,
+      handle: ({ projectId }) => { received.push(projectId); },
+    });
+    const feature = defineFeature({ name: "projects", events: [ProjectCreated], consumers: [welcome] });
+    const runtime = createConsumerRuntime([feature]);
+    const store = memoryJobStore(() => new Date(0));
+
+    assert.equal(runtime.bindings[0]?.target, welcome);
+    assert.deepEqual(Object.keys(runtime.handlers), ["projects.sendWelcome"]);
+    await store.appendOutbox(ProjectCreated, { projectId: "one" }, "project-created:one");
+    assert.equal(await dispatchOutbox(store, runtime.publisher(store), { now: () => new Date(0) }), 1);
+    assert.equal(await createWorker({ store, handlers: runtime.handlers, now: () => new Date(0) }).runOnce(new AbortController().signal), "succeeded");
+    assert.deepEqual(received, ["one"]);
+
+    const Unknown = durableEvent({ name: "UnknownEvent", parse: (value: unknown) => value });
+    await store.appendOutbox(Unknown, {}, "unknown:one");
+    await assert.rejects(dispatchOutbox(store, runtime.publisher(store), { now: () => new Date(1) }), /OUTBOX_CONSUMER_NOT_REGISTERED/);
   });
 
   it("materializes one schedule occurrence and dispatches outbox records once", async () => {

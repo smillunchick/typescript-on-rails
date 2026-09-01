@@ -244,12 +244,20 @@ async function appendOutboxWithExecutor<DB, T>(
   return { id: existing.id, replayed: true };
 }
 
-export function postgresOutboxWriter<DB>(executor: Kysely<DB> | Transaction<DB>) {
+export function postgresJobWriter<DB>(executor: Kysely<DB> | Transaction<DB>) {
   return Object.freeze({
+    enqueue(input: EnqueueJob) {
+      return enqueueWithExecutor(executor, input);
+    },
     appendOutbox<T>(event: DurableEvent<T>, payload: T, idempotencyKey: string) {
       return appendOutboxWithExecutor(executor, event, payload, idempotencyKey);
     },
   });
+}
+
+export function postgresOutboxWriter<DB>(executor: Kysely<DB> | Transaction<DB>) {
+  const writer = postgresJobWriter(executor);
+  return Object.freeze({ appendOutbox: writer.appendOutbox });
 }
 
 async function effectTransitionResult<DB>(
