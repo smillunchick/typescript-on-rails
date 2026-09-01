@@ -48,9 +48,13 @@ describe("Manifest v3 executable application graph", () => {
       assert.ok(v3.composition.some((record) => record.kind === "entrypoint" && record.name === "web"));
       assert.equal(v3.completeness.counts["discovered-undeclared"], 0);
       assert.ok(v3.completeness.counts.unknown >= 1);
+      assert.ok(v3.completeness.observations.some(({ kind }) => kind === "operation-calls"));
+      assert.deepEqual(v3.linkage.links, []);
+      assert.equal(v3.completeness.complete, false);
       const migrated = migrateManifestV2(v3.base);
       assert.equal(migrated.base, v3.base);
       assert.equal(migrated.completeness.complete, false);
+      assert.deepEqual(migrated.linkage.links, []);
     } finally {
       await fixture.cleanup();
     }
@@ -78,6 +82,7 @@ describe("Manifest v3 executable application graph", () => {
 
   it("migrates legacy package decisions without calling environment and clock APIs pure", () => {
     assert.deepEqual(migratePackageCapabilityV1("date-fns", "pure", "4.1.0").nondeterminism, ["none"]);
+    assert.equal(migratePackageCapabilityV1("date-fns", "pure", "4.1.0").provenance, "migrated-v1");
     assert.deepEqual(migratePackageCapabilityV1("node:os", "pure", process.versions.node).nondeterminism, ["environment", "clock"]);
     assert.deepEqual(migratePackageCapabilityV1("node:perf_hooks", "pure", process.versions.node).nondeterminism, ["environment", "clock"]);
     assert.throws(() => migratePackageCapabilityV1("date-fns", "pure", "unknown"), /exact package version/i);
@@ -111,11 +116,24 @@ describe("Manifest v3 executable application graph", () => {
       }, null, 2)}\n`);
 
       const manifest = analyzeApplicationV3(fixture.root);
-      assert.ok(manifest.packageCapabilities.some(({ package: name, packageVersion }) => name === "example-package/subpath" && packageVersion === "1.2.3"));
+      assert.equal(manifest.compiler.packageCapabilitySemantics, "descriptive");
+      assert.ok(manifest.packageCapabilities.some(({ package: name, packageVersion, provenance }) => name === "example-package/subpath" && packageVersion === "1.2.3" && provenance === "migrated-v1"));
       assert.ok(manifest.packageCapabilities.some(({ package: name, packageVersion }) => name === "node:os" && packageVersion === process.versions.node));
       assert.ok(!manifest.packageCapabilities.some(({ packageVersion }) => packageVersion === "unknown"));
       assert.ok(manifest.completeness.observations.some(({ category, kind, name }) => category === "unknown" && kind === "package-version" && name === "missing-package"));
       assert.equal(manifest.completeness.complete, false);
+
+      const declared = analyzeApplicationV3(fixture.root, {
+        packageCapabilitiesV2: [{
+          version: 2,
+          package: "example-package/subpath",
+          packageVersion: "1.2.3",
+          runtime: ["server"],
+          effects: ["filesystem"],
+          nondeterminism: ["none"],
+        }],
+      });
+      assert.equal(declared.packageCapabilities[0]?.provenance, "declared-v2");
 
       const stale = analyzeApplicationV3(fixture.root, {
         packageCapabilitiesV2: [

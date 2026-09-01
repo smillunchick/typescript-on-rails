@@ -20,7 +20,7 @@ Official modular packages provide the full-stack runtime:
 - `@typescript-on-rails/fullstack` — lifecycle, configuration, secrets, observability, local adapters, and semantic briefs; and
 - `@typescript-on-rails/testing` — operation, HTTP, PostgreSQL, job, and browser harnesses.
 
-The core does not import Next, React, PostgreSQL, or Kysely. Applications install only the official runtime packages they use. Manifest v2 analysis reads TypeScript source through the compiler API and does not import or execute application modules. In a full-stack app, the Manifest v3 CLI explicitly loads `src/app.ts` through the official TypeScript loader so it can inspect the executable composition graph.
+The core does not import Next, React, PostgreSQL, or Kysely. Applications install only the official runtime packages they use. Manifest v2 analysis reads TypeScript source through the compiler API and does not import or execute application modules. In a full-stack app, the Manifest v3 CLI explicitly loads `src/app.ts` through the official TypeScript loader. Its completeness result now requires source provenance, route-to-operation links, web bindings, durable-consumer worker bindings, and non-placeholder entrypoints.
 
 ## Install
 
@@ -31,6 +31,19 @@ npm install typescript-on-rails
 Use TypeScript `5.9.3`, the version supported by the architecture compiler.
 
 ## Quick start
+
+Create the full-stack application, install it, then run its framework check:
+
+```sh
+app new my-app
+cd my-app
+npm install
+npm run check
+```
+
+The generated app includes Next, PostgreSQL migrations and row security, an atomic request and outbox path, registered workers and schedulers, lifecycle configuration, and tests. Copy `.env.example` to `.env` and set an isolated PostgreSQL URL before running database commands or the complete integration test.
+
+Use `app new my-kernel --core` only when you want the minimal compiler-only scaffold.
 
 Define schemas and executable domain operations with explicit access rules:
 
@@ -117,7 +130,7 @@ The capabilities are:
 - `external-system`: allowed only in infrastructure;
 - `host-io`: allowed only in infrastructure.
 
-Unknown packages fail with a sorted inventory and a non-writing starter map. The starter values require an owner decision; the compiler never chooses package effects.
+Unknown packages fail with a sorted inventory and a non-writing starter map. The starter values require an owner decision; the compiler never chooses package effects. Manifest v3 labels each v2 record `declared-v2` or `migrated-v1` and states that v2 effects are descriptive. Declare v2 records when an exact effect such as `database` matters to planning; legacy migration remains a conservative upper bound.
 
 Type-only imports do not create runtime package uses. Exact subpath policy overrides a package-root policy. Node built-ins use framework-owned classifications.
 
@@ -142,7 +155,7 @@ app check
 npm run typecheck
 ```
 
-When the full-stack package is installed, `app dev`, `app build`, `app test`, `app migrate`, `app worker`, `app scheduler`, and `app seed` run its lifecycle registry. Legacy app-owned script delegation remains compatible for core-only applications.
+When the full-stack package is installed, `app dev`, `app build`, `app test`, `app migrate`, `app worker`, `app scheduler`, and `app seed` run its lifecycle registry. `app dev` supervises registered web, worker, and scheduler entrypoints concurrently and stops sibling processes when one fails. Legacy app-owned script delegation remains compatible for core-only applications.
 
 Use the other architecture views as needed:
 
@@ -165,4 +178,4 @@ app unknowns --json
 - [Reference SaaS architecture](examples/reference-saas/README.md)
 - [Full-stack reference application](examples/reference-fullstack/README.md)
 
-The compiler-only reference preserves the minimal core example. The full-stack reference proves the Next production build, server rendering, client interaction, sessions, durable in-memory work, local adapters, lifecycle commands, architecture checks, and Manifest v3 completeness without production credentials. Its PostgreSQL transaction, row-security, migration, outbox, and durable-store tests run when `TEST_DATABASE_URL` points to an isolated test database.
+The compiler-only reference preserves the minimal core example. The full-stack reference proves the Next production build, server rendering, client interaction, sessions, registered lifecycle entrypoints, compact agent views, architecture checks, and Manifest v3 completeness without production credentials. When `TEST_DATABASE_URL` points to an isolated database, one bound request writes the project and outbox atomically, dispatches the outbox to the registered consumer, and processes that job once.

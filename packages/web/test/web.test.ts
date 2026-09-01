@@ -1,14 +1,24 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
+import {
+  action,
+  defineApp,
+  defineFeature,
+  entrypoint,
+  object,
+  operationRoute,
+  string,
+} from "typescript-on-rails";
 
 import {
+  bindRoute,
   cookie,
   defineHttpHandler,
   requireTrustedMutation,
   safeErrorResponse,
 } from "../src/index.js";
-import { nextRoute } from "../src/next.js";
+import { nextRoute, nextRouteExportsFor } from "../src/next.js";
 import { renderReact } from "../src/react-render.js";
 
 describe("official web runtime", () => {
@@ -68,6 +78,49 @@ describe("official web runtime", () => {
     assert.deepEqual(await hidden.json(), {
       error: { code: "UNEXPECTED", message: "Unexpected server error" },
     });
+  });
+
+  it("derives an HTTP and Next handler from the registered core route", async () => {
+    let calls = 0;
+    const createProject = action({
+      input: object({ projectId: string(), name: string() }),
+      output: object({ projectId: string(), name: string() }),
+      permission: "project.create",
+      run: (input) => { calls += 1; return input; },
+    });
+    const route = operationRoute({ method: "POST", path: "/projects/:projectId", operation: createProject });
+    const binding = bindRoute(route, {
+      mutation: { trustedOrigins: ["https://example.test"] },
+      scope: (_input, execute) => execute({ permissions: new Set(["project.create"]) }),
+    });
+    const app = defineApp({
+      features: [defineFeature({ name: "projects", operations: { createProject }, routes: [route] })],
+      entrypoints: { web: entrypoint({ name: "web", process: "web", bindings: [binding], run: () => undefined }) },
+    });
+    const exports = nextRouteExportsFor(app.graph, "/projects/:projectId");
+    const request = new Request("https://example.test/projects/one", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://example.test", "sec-fetch-site": "same-origin" },
+      body: JSON.stringify({ name: "First" }),
+    });
+    const response = await exports.POST?.(request, { params: Promise.resolve({ projectId: "one" }) });
+
+    assert.ok(response);
+    assert.deepEqual(await response.json(), { projectId: "one", name: "First" });
+    assert.equal(binding.target, route);
+    assert.equal(calls, 1);
+
+    const rejected = await exports.POST?.(new Request("https://example.test/projects/two", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://evil.test", "sec-fetch-site": "cross-site" },
+      body: "{",
+    }), { params: Promise.resolve({ projectId: "two" }) });
+    assert.equal(rejected?.status, 403);
+    assert.equal(calls, 1);
+    assert.throws(
+      () => bindRoute(route, { scope: (_input, execute) => execute({ permissions: new Set() }) }),
+      /MUTATION_POLICY_REQUIRED/,
+    );
   });
 
   it("binds handlers to Next-compatible functions and renders React streams", async () => {

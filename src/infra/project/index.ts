@@ -11,7 +11,9 @@ export {
   createFeature,
   createModel,
   createQuery,
+  type ApplicationProfile,
   type ApplicationScaffoldFileSystem,
+  type ApplicationScaffoldOptions,
   type GenerationResult,
 } from "./scaffold.js";
 

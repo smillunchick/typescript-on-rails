@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { access } from "node:fs/promises";
 import path from "node:path";
+import { loadEnvFile } from "node:process";
 import { pathToFileURL } from "node:url";
 
 import { LifecycleRegistry, type LifecycleCommand, type LifecyclePlugin } from "./lifecycle.js";
@@ -37,6 +38,10 @@ if (command === undefined || !commands.has(command)) {
   const root = process.cwd();
   const configPath = path.join(root, "fullstack.config.mjs");
   try {
+    try { loadEnvFile(path.join(root, ".env")); }
+    catch (error) {
+      if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "ENOENT") throw error;
+    }
     await access(configPath);
     const imported: unknown = await import(pathToFileURL(configPath).href);
     const configured =

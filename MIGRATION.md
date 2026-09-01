@@ -4,9 +4,9 @@
 
 Manifest v3 is an additive executable-composition envelope. Manifest v2 remains byte- and semantic-compatible and stays available through `analyzeApplication`. Use `analyzeApplicationV3` when the application registers features, operations, routes, pages, permissions, events, consumers, adapters, process entry points, and test ownership with `defineApp`.
 
-Manifest v3 embeds the unchanged v2 manifest as `base`, analyzes configured support workspaces, and reports declared, discovered-but-undeclared, outside-root, and unknown behavior. A manifest is complete only when no discovered behavior or unknown public behavior remains. Use `migrateManifestV2` for an explicit conservative wrapper; it marks completeness false because v2 has no executable graph.
+Manifest v3 embeds the unchanged v2 manifest as `base`, analyzes configured support workspaces, and reports declared, discovered-but-undeclared, outside-root, and unknown behavior. Composition protocol v2 also records identity-derived runtime links and static source provenance. A manifest is complete only when routes derive from registered operations and web bindings, durable consumers bind to the registered worker, entrypoints are executable, test files exist, and no discovered or unknown behavior remains. Use `migrateManifestV2` for an explicit conservative wrapper; it marks completeness false because v2 has no executable graph or linkage evidence.
 
-Package capability v2 separates runtime location, effects, and nondeterminism and binds decisions to exact installed package versions. Automatic v1 migration resolves package metadata from each workspace and uses the active Node version for built-in modules. If a version cannot be resolved, Manifest v3 omits the unsafe decision and reports an unknown `package-version` observation. Programmatic `migratePackageCapabilityV1` calls must supply the exact version. Keep the legacy package map until every workspace consumes the new records.
+Package capability v2 separates runtime location, effects, and nondeterminism and binds decisions to exact installed package versions. The manifest labels records `declared-v2` or `migrated-v1` and reports the effect model as descriptive. Automatic v1 migration resolves package metadata from each workspace and uses the active Node version for built-in modules, but its effects are conservative upper bounds rather than owner decisions. If a version cannot be resolved, Manifest v3 omits the unsafe decision and reports an unknown `package-version` observation. Programmatic `migratePackageCapabilityV1` calls must supply the exact version. Keep the legacy package map for enforced source-role rules and declare v2 records when planning needs exact effects such as `database`.
 
 `diffArchitectureV3` compares the unchanged v2 semantic diff plus executable composition, completeness counts, and package-capability decisions.
 
@@ -233,7 +233,7 @@ Use names such as:
 }
 ```
 
-When `@typescript-on-rails/fullstack` is installed, `app dev`, `app build`, `app test`, `app check`, `app migrate`, `app worker`, `app scheduler`, and `app seed` use its lifecycle registry. Core-only applications keep the legacy app-owned `dev:app`, `build:app`, and `test:app` delegation path.
+When `@typescript-on-rails/fullstack` is installed, `app dev`, `app build`, `app test`, `app check`, `app migrate`, `app worker`, `app scheduler`, and `app seed` use its lifecycle registry. `app dev` runs registered web, worker, and scheduler entrypoints concurrently. Core-only applications keep the legacy app-owned `dev:app`, `build:app`, and `test:app` delegation path. New scaffolds are full-stack by default; use `app new <directory> --core` for the old minimal shape.
 
 ## Verify the migration
 

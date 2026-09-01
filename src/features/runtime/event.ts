@@ -6,7 +6,9 @@ type EventHandler = (payload: unknown) => Promise<void>;
 
 export interface EventDefinition<TPayload> {
   readonly name: string;
+  readonly version: number;
   readonly payload: Schema<TPayload>;
+  parse(value: unknown): TPayload;
   readonly metadata: {
     readonly kind: "event";
     readonly name: string;
@@ -19,11 +21,13 @@ export function event<TPayload>(definition: {
   readonly payload: Schema<TPayload>;
 }): EventDefinition<TPayload> {
   const payload = normalizeSchema(definition.payload);
-  return {
+  return Object.freeze({
     name: definition.name,
+    version: 1,
     payload,
-    metadata: { kind: "event", name: definition.name, payload: payload.metadata },
-  };
+    parse: (value: unknown) => payload.parse(value),
+    metadata: Object.freeze({ kind: "event" as const, name: definition.name, payload: payload.metadata }),
+  });
 }
 
 export interface EventBus {

@@ -8,6 +8,7 @@ export interface ComposedSemanticRecord {
 }
 export interface ArchitectureManifestV3Like {
   readonly composition: readonly ComposedSemanticRecord[];
+  readonly linkage?: { readonly links: readonly { readonly kind: string; readonly from: string; readonly to: string; readonly protocol?: string }[] };
   readonly base: { readonly dependencies: readonly { readonly from: string; readonly to: string; readonly file: string; readonly line: number; readonly symbols: readonly string[] }[] };
   readonly completeness: {
     readonly observations: readonly { readonly category: "declared" | "discovered-undeclared" | "outside-root" | "unknown"; readonly kind: string; readonly name: string; readonly root: string; readonly file?: string; readonly reason: string }[];
@@ -30,8 +31,9 @@ export interface SemanticBrief {
   readonly version: 1;
   readonly selectors: readonly string[];
   readonly records: readonly ComposedSemanticRecord[];
+  readonly links: readonly { readonly kind: string; readonly from: string; readonly to: string; readonly protocol?: string }[];
   readonly dependencies: ArchitectureManifestV3Like["base"]["dependencies"];
-  readonly completeness: ArchitectureManifestV3Like["completeness"];
+  readonly completeness: Pick<ArchitectureManifestV3Like["completeness"], "counts" | "complete">;
   readonly sourceBodiesIncluded: false;
   readonly contextBenefitClaim: false;
   readonly sha256: string;
@@ -41,12 +43,14 @@ export function semanticBrief(manifest: ArchitectureManifestV3Like, selectors: r
   const selected = [...new Set(selectors)].sort();
   const records = manifest.composition.filter((record) => selected.includes(record.owner) || selected.includes(record.name));
   const dependencies = manifest.base.dependencies.filter((edge) => selected.includes(edge.from) || selected.includes(edge.to));
+  const links = (manifest.linkage?.links ?? []).filter(({ from, to }) => selected.some((selector) => from.includes(`/${selector}/`) || to.includes(`/${selector}/`)));
   const body = {
     version: 1 as const,
     selectors: selected,
     records,
+    links,
     dependencies,
-    completeness: manifest.completeness,
+    completeness: { counts: manifest.completeness.counts, complete: manifest.completeness.complete },
     sourceBodiesIncluded: false as const,
     contextBenefitClaim: false as const,
   };
@@ -79,9 +83,26 @@ export class ExecutionTrace {
   }
 }
 
-export function testsFor(manifest: ArchitectureManifestV3Like, selector: string): readonly string[] {
+export interface TestView {
+  readonly file: string;
+  readonly owner: string;
+  readonly verification: "declared-only" | "source-exists" | "missing";
+}
+
+export function testsFor(
+  manifest: ArchitectureManifestV3Like,
+  selector: string,
+  options: { readonly exists?: (file: string) => boolean } = {},
+): readonly TestView[] {
   const owners = new Set(manifest.composition.filter((record) => record.name === selector || record.owner === selector).map(({ owner }) => owner));
-  return Object.freeze(manifest.composition.filter((record) => record.kind === "test" && owners.has(record.owner)).map(({ name }) => name).sort());
+  return Object.freeze(manifest.composition
+    .filter((record) => record.kind === "test" && owners.has(record.owner))
+    .map(({ name, owner }) => ({
+      file: name,
+      owner,
+      verification: options.exists === undefined ? "declared-only" as const : options.exists(name) ? "source-exists" as const : "missing" as const,
+    }))
+    .sort((left, right) => left.file.localeCompare(right.file)));
 }
 
 export function unknowns(manifest: ArchitectureManifestV3Like): readonly ArchitectureManifestV3Like["completeness"]["observations"][number][] {

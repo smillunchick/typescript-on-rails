@@ -60,6 +60,7 @@
   },
   "files": [
     "dist",
+    "templates",
     "README.md",
     "MIGRATION.md",
     "LICENSE"
@@ -78,7 +79,8 @@
     "packages:runtime-build": "npm run build --workspace=@typescript-on-rails/fullstack && npm run build --workspace=@typescript-on-rails/web && npm run build --workspace=@typescript-on-rails/postgres && npm run build --workspace=@typescript-on-rails/jobs && npm run build --workspace=@typescript-on-rails/testing",
     "packages:build": "npm run packages:runtime-build && npm run build --workspace=typescript-on-rails-reference-fullstack",
     "packages:check": "npm run check --workspaces --if-present",
-    "check": "npm run typecheck && npm test && npm run emit && npm run architecture:check && npm run reference:check && npm run packages:check",
+    "template:check": "tsc -p templates/fullstack/tsconfig.json --noEmit --incremental false",
+    "check": "npm run typecheck && npm test && npm run template:check && npm run emit && npm run architecture:check && npm run reference:check && npm run packages:check",
     "prepack": "npm run clean && npm run build",
     "prepublishOnly": "npm run check"
   },
