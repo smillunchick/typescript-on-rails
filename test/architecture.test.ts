@@ -106,6 +106,18 @@ export const email = implementAdapter(Email, { send: () => true });
     assert.match(diagnostic.suggestion ?? "", /@\/features\/billing/);
   });
 
+  it("enforces feature-to-infrastructure inversion in both directions", async () => {
+    const manifest = await analyze({
+      "src/features/billing/index.ts": `export const publicValue = true;`,
+      "src/features/billing/private.ts": `export const privateValue = true;`,
+      "src/features/billing/service.ts": `import { database } from "@/infra/database.js"; export const value = database;`,
+      "src/infra/database.ts": `export const database = true;`,
+      "src/infra/consumer.ts": `import { privateValue } from "../features/billing/private.js"; export const value = privateValue;`,
+    });
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "feature-infrastructure-boundary" && entry.file.includes("billing/service")));
+    assert.ok(manifest.diagnostics.some((entry) => entry.rule === "infrastructure-feature-boundary" && entry.file.includes("infra/consumer")));
+  });
+
   it("enforces named, star, and external-package re-exports", async () => {
     const manifest = await analyze({
       "node_modules/vendor-sdk/package.json": `{"name":"vendor-sdk","types":"index.d.ts"}`,

@@ -15,6 +15,11 @@ architecture.allow({
   reason: "TypeScript 5.9 checker flags prove compiler types before the required internal type refinements.",
 });
 
+architecture.allow({
+  rule: "infrastructure-feature-boundary",
+  reason: "Static type extraction implements the architecture feature's public manifest contract.",
+});
+
 export type {
   TypeContract,
   TypeContractDiagnostic,

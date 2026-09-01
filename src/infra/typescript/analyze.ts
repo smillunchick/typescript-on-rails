@@ -57,6 +57,11 @@ architecture.allow({
   reason: "The TypeScript compiler API exposes generic type references without a public runtime type guard.",
 });
 
+architecture.allow({
+  rule: "infrastructure-feature-boundary",
+  reason: "The architecture compiler implementation consumes the architecture feature's semantic ID and manifest contracts.",
+});
+
 const FRAMEWORK_PACKAGE = "typescript-on-rails";
 
 const RULE_CODES: Readonly<Record<string, string>> = {
@@ -79,6 +84,8 @@ const RULE_CODES: Readonly<Record<string, string>> = {
   [PACKAGE_POLICY_RULE]: "ARCH017",
   "source-role": "ARCH018",
   "dynamic-import": "ARCH019",
+  "feature-infrastructure-boundary": "ARCH020",
+  "infrastructure-feature-boundary": "ARCH021",
 };
 
 interface PendingAdapterLink {
@@ -287,9 +294,14 @@ function discoverFeatures(root: string, files: readonly ts.SourceFile[]): Featur
 
 function isFrameworkImport(sourceFile: ts.SourceFile, specifier: string): boolean {
   if (specifier === FRAMEWORK_PACKAGE || specifier.startsWith(`${FRAMEWORK_PACKAGE}/`)) return true;
-  if (specifier !== "./architecture.js" && specifier !== "../../features/runtime/index.js") return false;
+  if (
+    specifier !== "./architecture.js" &&
+    specifier !== "../runtime/index.js" &&
+    specifier !== "../../features/runtime/index.js"
+  ) return false;
   const source = slash(sourceFile.fileName);
   if (specifier === "./architecture.js") return source.includes("/src/features/runtime/");
+  if (specifier === "../runtime/index.js") return source.includes("/src/features/");
   return source.includes("/src/infra/typescript/");
 }
 
@@ -891,6 +903,24 @@ function checkImports(
     const specifier = entry.specifier;
     if (specifier === undefined) continue;
     const targetFeature = entry.resolved === undefined ? null : featureNameFor(root, entry.resolved);
+    if (sourceFeature !== null && entry.resolved !== undefined && isInfra(root, entry.resolved)) {
+      output.diagnostics.push(diagnostic(
+        "feature-infrastructure-boundary",
+        `${sourceFeature} cannot import infrastructure module ${specifier}`,
+        importLocation.file,
+        importLocation.line,
+        { suggestion: "Declare a feature-owned port and provide the implementation from application composition", target: specifier },
+      ));
+    }
+    if (isInfra(root, sourceFile.fileName) && targetFeature !== null && entry.resolved !== undefined && !/^index\.tsx?$/.test(path.basename(entry.resolved))) {
+      output.diagnostics.push(diagnostic(
+        "infrastructure-feature-boundary",
+        `Infrastructure must import ${targetFeature} through its public boundary`,
+        importLocation.file,
+        importLocation.line,
+        { suggestion: `Import from @/features/${targetFeature}`, target: targetFeature },
+      ));
+    }
     if (sourceFeature !== null && targetFeature !== null && sourceFeature !== targetFeature) {
       output.dependencies.push({
         from: sourceFeature,

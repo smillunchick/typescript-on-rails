@@ -1,6 +1,7 @@
 export * from "./adapter.js";
 export * from "./architecture.js";
 export * from "./app.js";
+export * from "./composition.js";
 export * from "./errors.js";
 export * from "./event.js";
 export * from "./executable.js";

@@ -1,0 +1,35 @@
+{
+  "name": "@typescript-on-rails/fullstack",
+  "version": "0.1.0",
+  "description": "Application lifecycle, configuration, observability, local adapters, and agent tooling for TypeScript on Rails.",
+  "repository": { "type": "git", "url": "git+https://github.com/smillunchick/typescript-on-rails.git", "directory": "packages/fullstack" },
+  "bugs": { "url": "https://github.com/smillunchick/typescript-on-rails/issues" },
+  "homepage": "https://github.com/smillunchick/typescript-on-rails#readme",
+  "publishConfig": { "access": "public" },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": { "tor-lifecycle": "./dist/bin.js" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./application-loader": {
+      "types": "./dist/application-loader.d.ts",
+      "import": "./dist/application-loader.js",
+      "default": "./dist/application-loader.js"
+    },
+    "./lifecycle-bin": "./dist/bin.js"
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node --input-type=module -e \"import { chmodSync } from 'node:fs'; chmodSync('dist/bin.js', 0o755);\"",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepack": "npm run build"
+  },
+  "dependencies": { "tsx": "4.20.6" },
+  "peerDependencies": { "typescript-on-rails": "0.1.0" },
+  "devDependencies": { "@types/node": "^24.10.0", "typescript": "5.9.3", "typescript-on-rails": "file:../.." },
+  "engines": { "node": ">=22" },
+  "license": "MIT"
+}

@@ -3,11 +3,11 @@
 
 ## Current shipped scope
 
-The shipped product is an application architecture kernel and compiler with runtime contract primitives. It provides architecture analysis, strict TypeScript conventions, application structure, generators, and introspection.
+The shipped product is an agent-native full-stack TypeScript framework with a small architecture compiler at its core and modular official runtimes. The core provides architecture analysis, strict TypeScript conventions, application structure, generators, Manifest v3, and introspection without importing Next, React, PostgreSQL, or Kysely.
 
-It does not provide HTTP serving, rendered UI, persistence or storage, or bundling. Applications own those runtime layers and their development, build, and test scripts. No-emit TypeScript checks are not application builds.
+Official packages provide the supported Next and React web path, PostgreSQL and Kysely persistence, PostgreSQL-backed durable work, application lifecycle and local adapters, and full-stack test harnesses. Applications install only the modules they use. Manifest v2 remains compatible while Manifest v3 adds executable composition, completeness, workspace, and package-effect facts.
 
-This document also describes a long-term architecture framework vision. HTTP, UI, persistence, storage, and bundling discussed below are future directions, not features of the shipped package.
+This document records both the implemented architecture and the principles that govern later improvements. Sections that say “should” remain design doctrine, not a claim that every possible adapter or deployment target exists.
 
 ## 1. Premise
 
@@ -310,9 +310,9 @@ That one convention creates enormous architectural leverage.
 
 ---
 
-# 6. Long-Term Full-Stack Vision
+# 6. Full-Stack Architecture
 
-A future architecture framework should allow a feature to span the complete application stack.
+The modular framework allows a feature to span the complete application stack.
 
 For example, `projects` may own:
 
@@ -804,7 +804,7 @@ app boundaries
 app exceptions
 ```
 
-In the shipped kernel, `app check` performs architecture checks. `app dev`, `app build`, and `app test` only delegate to matching app-owned scripts; the kernel does not supply those lifecycles.
+In a full-stack application, `app check` runs architecture checks and the configured full-stack check lifecycle. `app dev`, `app build`, `app test`, `app migrate`, `app worker`, `app scheduler`, and `app seed` run the official lifecycle registry. Core-only applications retain legacy app-script delegation.
 
 Avoid dozens of generators.
 
@@ -1482,11 +1482,11 @@ Framework features that violate them should face a very high bar.
 
 ---
 
-# 39. Long-Term Product Scope
+# 39. Product Scope
 
-A future full-stack version should not attempt to solve every category of software.
+The full-stack framework does not attempt to solve every category of software.
 
-A sensible future target would be:
+Its supported target is:
 
 > **Full-stack database-backed web applications and SaaS products.**
 

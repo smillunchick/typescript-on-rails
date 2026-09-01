@@ -1,7 +1,7 @@
 {
   "name": "typescript-on-rails",
   "version": "0.1.0",
-  "description": "An agent-native TypeScript application architecture kernel and compiler with runtime contract primitives.",
+  "description": "An agent-native full-stack TypeScript framework with an architecture compiler and modular official runtimes.",
   "keywords": [
     "typescript",
     "framework",
@@ -23,6 +23,10 @@
     "access": "public"
   },
   "type": "module",
+  "workspaces": [
+    "packages/*",
+    "examples/reference-fullstack"
+  ],
   "typescriptOnRails": {
     "packageCapabilities": {
       "typescript": "host-io"
@@ -62,13 +66,19 @@
   ],
   "scripts": {
     "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
-    "build": "tsc -p tsconfig.json",
-    "emit": "tsc -p tsconfig.json --noCheck",
+    "build": "tsc -p tsconfig.json && node --input-type=module -e \"import { chmodSync } from 'node:fs'; chmodSync('dist/bin.js', 0o755);\"",
+    "emit": "tsc -p tsconfig.json --noCheck && node --input-type=module -e \"import { chmodSync } from 'node:fs'; chmodSync('dist/bin.js', 0o755);\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p examples/reference-saas/tsconfig.json",
-    "test": "node --import tsx --test test/*.test.ts && npm --prefix examples/reference-saas run test:app",
+    "test:core": "node --import tsx --test test/*.test.ts",
+    "test:packages": "npm run packages:build && npm run test --workspaces --if-present && npm run test:fullstack-loader",
+    "test:fullstack-loader": "node --import tsx --test test/fullstack-loader.integration.mts",
+    "test": "npm run emit && npm run test:core && npm --prefix examples/reference-saas run test:app && npm run test:packages",
     "architecture:check": "node dist/bin.js check",
-    "reference:check": "npm --prefix examples/reference-saas run check",
-    "check": "npm run typecheck && npm test && npm run emit && npm run architecture:check && npm run reference:check",
+    "reference:check": "npm --prefix examples/reference-saas run check && npm --prefix examples/reference-fullstack run check",
+    "packages:runtime-build": "npm run build --workspace=@typescript-on-rails/fullstack && npm run build --workspace=@typescript-on-rails/web && npm run build --workspace=@typescript-on-rails/postgres && npm run build --workspace=@typescript-on-rails/jobs && npm run build --workspace=@typescript-on-rails/testing",
+    "packages:build": "npm run packages:runtime-build && npm run build --workspace=typescript-on-rails-reference-fullstack",
+    "packages:check": "npm run check --workspaces --if-present",
+    "check": "npm run typecheck && npm test && npm run emit && npm run architecture:check && npm run reference:check && npm run packages:check",
     "prepack": "npm run clean && npm run build",
     "prepublishOnly": "npm run check"
   },

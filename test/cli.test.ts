@@ -98,23 +98,25 @@ async function assertGeneratedTypechecks(root: string): Promise<void> {
 }
 
 describe("shipped product positioning", () => {
-  it("describes the current architecture kernel and its explicit limits", async () => {
-    const packageJson = JSON.parse(await readFile(path.resolve("package.json"), "utf8"));
+  it("describes the modular full-stack framework without making the core package heavy", async () => {
+    const packageJson = JSON.parse(await readFile(path.resolve("package.json"), "utf8")) as {
+      description: string;
+      dependencies: Record<string, string>;
+    };
     const readme = await readFile(path.resolve("README.md"), "utf8");
     const vision = await readFile(path.resolve(".docs/agent-native-typescript-framework-architecture.md"), "utf8");
 
     assert.equal(
       packageJson.description,
-      "An agent-native TypeScript application architecture kernel and compiler with runtime contract primitives.",
+      "An agent-native full-stack TypeScript framework with an architecture compiler and modular official runtimes.",
     );
+    assert.deepEqual(Object.keys(packageJson.dependencies), ["typescript"]);
     for (const documentation of [readme, vision]) {
-      assert.match(documentation, /application architecture kernel/i);
-      assert.match(documentation, /HTTP serving/);
-      assert.match(documentation, /rendered UI/);
-      assert.match(documentation, /persistence/);
-      assert.match(documentation, /storage/);
-      assert.match(documentation, /bundling/);
-      assert.match(documentation, /no-emit TypeScript checks are not application builds/i);
+      assert.match(documentation, /full-stack TypeScript framework/i);
+      assert.match(documentation, /modular/i);
+      assert.match(documentation, /Manifest v3/i);
+      assert.match(documentation, /PostgreSQL/i);
+      assert.match(documentation, /Next/i);
     }
   });
 });
@@ -254,7 +256,7 @@ describe("app CLI checks and lifecycle", () => {
     assert.equal(result.stdout, "");
     assert.equal(
       result.stderr,
-      "Missing app-owned script \"dev:app\". The architecture kernel does not supply the dev lifecycle.\n",
+      "Missing full-stack lifecycle or legacy app-owned script \"dev:app\" for dev.\n",
     );
     assert.deepEqual(calls, []);
   });
@@ -267,9 +269,9 @@ describe("app CLI checks and lifecycle", () => {
     assert.equal(unknown.code, 2);
     assert.equal(invalid.code, 2);
     assert.match(unknown.stderr, /^Usage: app /);
-    assert.match(unknown.stderr, /application architecture kernel and compiler with runtime contract primitives/i);
-    assert.match(unknown.stderr, /Does not provide HTTP serving, rendered UI, persistence or storage, or bundling\./);
-    assert.match(unknown.stderr, /No-emit TypeScript checks are not application builds\./);
+    assert.match(unknown.stderr, /full-stack TypeScript framework/i);
+    assert.match(unknown.stderr, /Official modular packages provide web, PostgreSQL, durable work, lifecycle, and test runtimes\./);
+    assert.match(unknown.stderr, /Core-only applications keep the legacy lifecycle delegation path\./);
     assert.equal(unknown.stdout, "");
   });
 });

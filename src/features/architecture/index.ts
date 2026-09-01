@@ -1,4 +1,19 @@
 export { analyzeApplication } from "./analyze.js";
+export {
+  analyzeApplicationV3,
+  migrateManifestV2,
+  migratePackageCapabilityV1,
+  resolvePackageCapabilitiesV2,
+  type AnalyzeApplicationV3Options,
+  type ArchitectureManifestV3,
+  type CompletenessObservation,
+  type ComposedSemanticRecord,
+  type PackageCapabilityV2,
+  type PackageEffect,
+  type PackageNondeterminism,
+  type PackageRuntimeLocation,
+  type WorkspaceArchitectureManifest,
+} from "./manifest-v3.js";
 export { formatArchitectureDiagnostic } from "./diagnostics.js";
 export {
   decodeSemanticId,
