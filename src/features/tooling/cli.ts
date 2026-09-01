@@ -1,7 +1,11 @@
+import { architecture } from "../runtime/index.js";
 import {
   analyzeApplication,
+  analyzeApplicationV3,
   formatArchitectureDiagnostic,
+  type AnalyzeApplicationV3Options,
   type ArchitectureManifest,
+  type ArchitectureManifestV3,
 } from "../architecture/index.js";
 import {
   assertManifestV2,
@@ -26,10 +30,18 @@ import {
   createModel,
   createQuery,
   hasAppOwnedScript,
+  hasFullStackLifecycle,
+  loadFullStackApplication,
+  resolveFullStackLifecycleBin,
   runProjectCommand,
   validateGitRef,
   type GenerationResult,
 } from "../../infra/project/index.js";
+
+architecture.allow({
+  rule: "feature-infrastructure-boundary",
+  reason: "The tooling feature owns CLI behavior while project process and filesystem access remain infrastructure.",
+});
 
 export interface CliStream {
   write(chunk: string): unknown;
@@ -48,6 +60,10 @@ export interface CliDependencies {
   readonly stdout?: CliStream;
   readonly stderr?: CliStream;
   readonly runCommand?: CommandRunner;
+  readonly resolveFullStackLifecycle?: (root: string) => string;
+  readonly loadFullStackApplication?: (
+    root: string,
+  ) => Promise<AnalyzeApplicationV3Options["application"] | undefined>;
   readonly analyze?: (root: string) => ArchitectureManifest;
   readonly inspect?: (root: string) => ApplicationInspector;
   readonly architectureDiff?: (root: string, ref: string) => Promise<ArchitectureDiff>;
@@ -59,13 +75,13 @@ export interface CliDependencies {
 
 const usage = `Usage: app <command> [options]
 
-TypeScript application architecture kernel and compiler with runtime contract primitives.
-Does not provide HTTP serving, rendered UI, persistence or storage, or bundling.
-No-emit TypeScript checks are not application builds.
+Agent-native full-stack TypeScript framework with a small architecture compiler core.
+Official modular packages provide web, PostgreSQL, durable work, lifecycle, and test runtimes.
+Core-only applications keep the legacy lifecycle delegation path.
 
 Commands:
   new <directory>
-  dev | build | test
+  dev | build | test | migrate | worker | scheduler | seed
   check [--json] [--with-tests]
   create feature <name>
   create model|action|query <name> --feature <feature>
@@ -74,6 +90,11 @@ Commands:
   owners|boundaries|exceptions [--json]
   impact <public-symbol> [--json]
   diff --architecture [--base <git-ref>] [--json]
+  manifest --v3 [--json]
+  brief <feature> [--json]
+  trace <operation-or-route> [--json]
+  tests-for <feature-or-operation> [--json]
+  unknowns [--json]
 `;
 
 class CliUsageError extends Error {}
@@ -102,15 +123,25 @@ function formatList(values: readonly unknown[]): string {
   }).join("\n")}\n`;
 }
 
+type LifecycleCommand = "dev" | "build" | "test" | "check" | "migrate" | "worker" | "scheduler" | "seed";
+
 async function lifecycle(
-  command: "dev" | "build" | "test",
+  command: LifecycleCommand,
   cwd: string,
   stderr: CliStream,
   runCommand: CommandRunner,
+  resolveLifecycle: (root: string) => string,
 ): Promise<number> {
+  if (await hasFullStackLifecycle(cwd)) {
+    return runCommand({
+      command: process.execPath,
+      args: [resolveLifecycle(cwd), command],
+      cwd,
+    });
+  }
   const script = `${command}:app`;
   if (!(await hasAppOwnedScript(cwd, script))) {
-    stderr.write(`Missing app-owned script "${script}". The architecture kernel does not supply the ${command} lifecycle.\n`);
+    stderr.write(`Missing full-stack lifecycle or legacy app-owned script "${script}" for ${command}.\n`);
     return 1;
   }
   return runCommand({ command: "npm", args: ["run", script], cwd });
@@ -123,6 +154,7 @@ async function runCheck(
   stderr: CliStream,
   analyze: (root: string) => ArchitectureManifest,
   runCommand: CommandRunner,
+  resolveLifecycle: (root: string) => string,
 ): Promise<number> {
   onlyFlags(args, ["--json", "--with-tests"]);
   const asJson = oneFlag(args, "--json");
@@ -134,6 +166,13 @@ async function runCheck(
   if (errors.length > 0) {
     if (asJson) json(stdout, { ok: false, diagnostics: manifest.diagnostics });
     return 1;
+  }
+  if (await hasFullStackLifecycle(cwd)) {
+    const fullStackCode = await lifecycle("check", cwd, stderr, runCommand, resolveLifecycle);
+    if (fullStackCode !== 0) {
+      if (asJson) json(stdout, { ok: false, diagnostics: [], fullStack: { ok: false, exitCode: fullStackCode } });
+      return fullStackCode;
+    }
   }
   if (withTests) {
     const testCode = await runCommand({ command: "npm", args: ["run", "test:app"], cwd });
@@ -282,6 +321,68 @@ function runImpact(args: readonly string[], inspector: ApplicationInspector, std
   return 0;
 }
 
+async function v3Manifest(
+  cwd: string,
+  loadApplication: (
+    root: string,
+  ) => Promise<AnalyzeApplicationV3Options["application"] | undefined>,
+): Promise<ArchitectureManifestV3> {
+  const application = await loadApplication(cwd);
+  return analyzeApplicationV3(cwd, application === undefined ? {} : { application });
+}
+
+async function renderV3Projection(
+  command: "manifest" | "brief" | "trace" | "tests-for" | "unknowns",
+  args: readonly string[],
+  cwd: string,
+  stdout: CliStream,
+  loadApplication: (
+    root: string,
+  ) => Promise<AnalyzeApplicationV3Options["application"] | undefined>,
+): Promise<number> {
+  const manifest = await v3Manifest(cwd, loadApplication);
+  const asJson = args.includes("--json");
+  if (command === "manifest") {
+    onlyFlags(args, ["--v3", "--json"]);
+    if (!args.includes("--v3")) throw new CliUsageError("Expected manifest --v3");
+    json(stdout, manifest);
+    return 0;
+  }
+  const positional = args.filter((entry) => entry !== "--json");
+  if (command === "unknowns") {
+    if (positional.length > 0) throw new CliUsageError("unknowns accepts only --json");
+    const values = manifest.completeness.observations.filter(({ category }) => category !== "declared");
+    if (asJson) json(stdout, { completeness: manifest.completeness, unknowns: values });
+    else stdout.write(formatList(values));
+    return 0;
+  }
+  const selector = positional[0];
+  if (selector === undefined || positional.length !== 1) throw new CliUsageError(`Expected ${command} <selector>`);
+  if (command === "brief") {
+    const features = manifest.base.features.filter(({ name }) => name === selector);
+    const composition = manifest.composition.filter(({ owner, name }) => owner === selector || name === selector);
+    const dependencies = manifest.base.dependencies.filter(({ from, to }) => from === selector || to === selector);
+    const value = { selector, features, composition, dependencies, completeness: manifest.completeness, sourceBodiesIncluded: false, contextBenefitClaim: false };
+    if (asJson) json(stdout, value); else stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+    return features.length > 0 || composition.length > 0 ? 0 : 1;
+  }
+  if (command === "tests-for") {
+    const owners = new Set(manifest.composition.filter(({ owner, name }) => owner === selector || name === selector).map(({ owner }) => owner));
+    if (manifest.base.features.some(({ name }) => name === selector)) owners.add(selector);
+    const tests = manifest.composition.filter(({ kind, owner }) => kind === "test" && owners.has(owner)).map(({ name }) => name).sort();
+    if (asJson) json(stdout, { selector, tests, completeness: manifest.completeness }); else stdout.write(formatList(tests));
+    return 0;
+  }
+  const records = [
+    ...manifest.base.operations.filter(({ name }) => name === selector),
+    ...manifest.base.routes.filter(({ name, path }) => name === selector || path === selector),
+  ];
+  const owners = new Set(records.map(({ feature }) => feature).filter((feature): feature is string => feature !== null));
+  const value = { selector, records, dependencies: manifest.base.dependencies.filter(({ from, to }) => owners.has(from) || owners.has(to)), completeness: manifest.completeness, runtimeTraceAvailable: false };
+  if (asJson) json(stdout, value); else stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  return records.length > 0 ? 0 : 1;
+}
+
 function parseDiff(args: readonly string[]): { readonly base: string; readonly asJson: boolean } {
   if (args[0] !== "--architecture") throw new CliUsageError("Expected diff --architecture");
   let base = "HEAD";
@@ -332,6 +433,11 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
   const stdout = dependencies.stdout ?? process.stdout;
   const stderr = dependencies.stderr ?? process.stderr;
   const runCommand = dependencies.runCommand ?? runProjectCommand;
+  const resolveLifecycle = dependencies.resolveFullStackLifecycle ?? resolveFullStackLifecycleBin;
+  const loadApplication =
+    dependencies.loadFullStackApplication ??
+    (async (root: string) =>
+      (await hasFullStackLifecycle(root)) ? loadFullStackApplication(root) : undefined);
   const analyze = dependencies.analyze ?? analyzeApplication;
   const inspect = dependencies.inspect ?? inspectApplication;
   const architectureDiff = dependencies.architectureDiff ?? createGitArchitectureDiff;
@@ -345,11 +451,11 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       renderGeneration(stdout, await scaffoldApplication(cwd, rest[0]));
       return 0;
     }
-    if (command === "dev" || command === "build" || command === "test") {
+    if (command === "dev" || command === "build" || command === "test" || command === "migrate" || command === "worker" || command === "scheduler" || command === "seed") {
       if (rest.length !== 0) throw new CliUsageError(`Unexpected arguments for ${command}`);
-      return await lifecycle(command, cwd, stderr, runCommand);
+      return await lifecycle(command, cwd, stderr, runCommand, resolveLifecycle);
     }
-    if (command === "check") return await runCheck(rest, cwd, stdout, stderr, analyze, runCommand);
+    if (command === "check") return await runCheck(rest, cwd, stdout, stderr, analyze, runCommand, resolveLifecycle);
     if (command === "create") return await runCreate(rest, cwd, stdout);
     if (command === "explain") return runExplain(rest, inspect(cwd), stdout, stderr);
     if (command === "graph") return runGraph(rest, inspect(cwd), stdout);
@@ -363,6 +469,9 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       if (parsed.asJson) json(stdout, diff);
       else stdout.write(formatArchitectureDiff(diff));
       return 0;
+    }
+    if (command === "manifest" || command === "brief" || command === "trace" || command === "tests-for" || command === "unknowns") {
+      return await renderV3Projection(command, rest, cwd, stdout, loadApplication);
     }
     throw new CliUsageError(`Unknown command: ${command}`);
   } catch (error) {

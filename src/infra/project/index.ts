@@ -25,5 +25,10 @@ export {
   type RuntimePackageIdentity,
   type SelectedPackagePolicy,
 } from "./package-policy.js";
-export { hasAppOwnedScript } from "./package-script.js";
+export {
+  hasAppOwnedScript,
+  hasFullStackLifecycle,
+  loadFullStackApplication,
+  resolveFullStackLifecycleBin,
+} from "./package-script.js";
 export { runProjectCommand, type ProjectCommandInvocation } from "./process.js";

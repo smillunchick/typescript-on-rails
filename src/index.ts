@@ -1,10 +1,23 @@
 export {
   analyzeApplication,
+  analyzeApplicationV3,
   architecture,
+  migrateManifestV2,
+  migratePackageCapabilityV1,
+  resolvePackageCapabilitiesV2,
   decodeSemanticId,
   encodeSemanticId,
 } from "./features/architecture/index.js";
 export type {
+  AnalyzeApplicationV3Options,
+  ArchitectureManifestV3,
+  CompletenessObservation,
+  ComposedSemanticRecord,
+  PackageCapabilityV2,
+  PackageEffect,
+  PackageNondeterminism,
+  PackageRuntimeLocation,
+  WorkspaceArchitectureManifest,
   AdapterContractManifest,
   AdapterImplementationManifest,
   AdapterManifest,

@@ -1,4 +1,40 @@
-# Migrate to architecture manifest v2
+# Migrate architecture manifests
+
+## Adopt Manifest v3 without changing v2
+
+Manifest v3 is an additive executable-composition envelope. Manifest v2 remains byte- and semantic-compatible and stays available through `analyzeApplication`. Use `analyzeApplicationV3` when the application registers features, operations, routes, pages, permissions, events, consumers, adapters, process entry points, and test ownership with `defineApp`.
+
+Manifest v3 embeds the unchanged v2 manifest as `base`, analyzes configured support workspaces, and reports declared, discovered-but-undeclared, outside-root, and unknown behavior. A manifest is complete only when no discovered behavior or unknown public behavior remains. Use `migrateManifestV2` for an explicit conservative wrapper; it marks completeness false because v2 has no executable graph.
+
+Package capability v2 separates runtime location, effects, and nondeterminism and binds decisions to exact installed package versions. Automatic v1 migration resolves package metadata from each workspace and uses the active Node version for built-in modules. If a version cannot be resolved, Manifest v3 omits the unsafe decision and reports an unknown `package-version` observation. Programmatic `migratePackageCapabilityV1` calls must supply the exact version. Keep the legacy package map until every workspace consumes the new records.
+
+`diffArchitectureV3` compares the unchanged v2 semantic diff plus executable composition, completeness counts, and package-capability decisions.
+
+Full-stack CLI commands load `src/app.ts` through `@typescript-on-rails/fullstack` before creating Manifest v3. Programmatic callers pass the `application` returned by `defineApp` to `analyzeApplicationV3`. Support workspaces and version-bound capability decisions can live in `package.json`:
+
+```json
+{
+  "typescriptOnRails": {
+    "architectureWorkspaces": [
+      { "name": "contracts", "root": "packages/contracts" }
+    ],
+    "packageCapabilitiesV2": [
+      {
+        "version": 2,
+        "package": "pg",
+        "packageVersion": "8.22.0",
+        "runtime": ["server"],
+        "effects": ["database", "network"],
+        "nondeterminism": ["external"]
+      }
+    ]
+  }
+}
+```
+
+Manifest v3 inherits application capability decisions into each configured support workspace. A workspace can override a package version through its own legacy package policy or through programmatic v3 options during a staged migration.
+
+## Migrate to architecture manifest v2
 
 Manifest v2 is a breaking semantic boundary. It replaces path-based, name-only records and opaque contract strings with stable semantic IDs, explicit package capabilities, and separate static and runtime contract facts.
 
@@ -197,7 +233,7 @@ Use names such as:
 }
 ```
 
-`app dev`, `app build`, and `app test` only delegate to app-owned `dev:app`, `build:app`, and `test:app` scripts. Add those scripts only when the application has a real runtime, build, or test lifecycle.
+When `@typescript-on-rails/fullstack` is installed, `app dev`, `app build`, `app test`, `app check`, `app migrate`, `app worker`, `app scheduler`, and `app seed` use its lifecycle registry. Core-only applications keep the legacy app-owned `dev:app`, `build:app`, and `test:app` delegation path.
 
 ## Verify the migration
 

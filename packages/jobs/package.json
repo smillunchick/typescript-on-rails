@@ -1,0 +1,19 @@
+{
+  "name": "@typescript-on-rails/jobs",
+  "version": "0.1.0",
+  "description": "PostgreSQL-backed durable jobs, outbox, schedules, and reconciliation for TypeScript on Rails.",
+  "repository": { "type": "git", "url": "git+https://github.com/smillunchick/typescript-on-rails.git", "directory": "packages/jobs" },
+  "bugs": { "url": "https://github.com/smillunchick/typescript-on-rails/issues" },
+  "homepage": "https://github.com/smillunchick/typescript-on-rails#readme",
+  "publishConfig": { "access": "public" },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.test.json", "test": "node --import tsx --test test/*.test.ts", "check": "npm run typecheck && npm test && npm run build", "prepack": "npm run build" },
+  "dependencies": { "kysely": "0.29.4" },
+  "devDependencies": { "@types/node": "^24.10.0", "@typescript-on-rails/postgres": "0.1.0", "tsx": "^4.20.6", "typescript": "5.9.3" },
+  "engines": { "node": ">=22" },
+  "license": "MIT"
+}

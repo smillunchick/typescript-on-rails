@@ -23,6 +23,11 @@ architecture.allow({
   reason: "TypeScript 5.9 does not narrow compiler types after tuple and literal flag checks.",
 });
 
+architecture.allow({
+  rule: "infrastructure-feature-boundary",
+  reason: "Static schema extraction implements the architecture feature's public manifest contract.",
+});
+
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }

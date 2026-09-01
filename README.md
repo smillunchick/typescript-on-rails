@@ -1,20 +1,26 @@
 # typescript-on-rails
 
-An agent-native TypeScript application architecture kernel and compiler with runtime contract primitives. It keeps application code organized by feature and makes architectural boundaries explicit.
+An agent-native, full-stack TypeScript framework for Node, Next and React, PostgreSQL and Kysely, and PostgreSQL-backed durable work. It keeps application code organized by feature and makes architectural boundaries explicit.
 
 ## Current scope
 
-The package provides:
+The small `typescript-on-rails` core provides:
 
-- static architecture analysis;
-- strict TypeScript conventions;
+- static architecture analysis and strict TypeScript conventions;
 - feature-oriented application structure and generators;
-- manifest v2, semantic diff, and introspection;
-- synchronous schema, operation, route, event, model, and adapter primitives.
+- byte-compatible Manifest v2 plus executable-composition Manifest v3;
+- semantic diff, completeness reporting, introspection, and agent views; and
+- synchronous schema, operation, route, event, model, adapter, feature, page, consumer, and process primitives.
 
-It does not provide HTTP serving, rendered UI, persistence or storage, or bundling. Applications own those runtime layers and their development, build, and test scripts. No-emit TypeScript checks are not application builds.
+Official modular packages provide the full-stack runtime:
 
-The analyzer reads TypeScript source through the compiler API. It does not import or execute application modules.
+- `@typescript-on-rails/web` — host-neutral HTTP and maintained Next/React bindings;
+- `@typescript-on-rails/postgres` — Kysely transactions, migrations, tenant context, ownership, seeds, and test databases;
+- `@typescript-on-rails/jobs` — durable events, outbox, jobs, retries, leases, dead letters, schedules, and reconciliation;
+- `@typescript-on-rails/fullstack` — lifecycle, configuration, secrets, observability, local adapters, and semantic briefs; and
+- `@typescript-on-rails/testing` — operation, HTTP, PostgreSQL, job, and browser harnesses.
+
+The core does not import Next, React, PostgreSQL, or Kysely. Applications install only the official runtime packages they use. Manifest v2 analysis reads TypeScript source through the compiler API and does not import or execute application modules. In a full-stack app, the Manifest v3 CLI explicitly loads `src/app.ts` through the official TypeScript loader so it can inspect the executable composition graph.
 
 ## Install
 
@@ -129,14 +135,14 @@ Domain and application code cannot use literal dynamic imports. Computed imports
 
 ## Commands
 
-Generated applications expose working kernel commands:
+Generated full-stack applications expose framework-owned lifecycle commands through `@typescript-on-rails/fullstack` plugins:
 
 ```sh
 app check
 npm run typecheck
 ```
 
-`app dev`, `app build`, and `app test` only delegate to app-owned `dev:app`, `build:app`, and `test:app` scripts. The kernel does not invent those lifecycles.
+When the full-stack package is installed, `app dev`, `app build`, `app test`, `app migrate`, `app worker`, `app scheduler`, and `app seed` run its lifecycle registry. Legacy app-owned script delegation remains compatible for core-only applications.
 
 Use the other architecture views as needed:
 
@@ -146,11 +152,17 @@ app graph --json
 app owners --json
 app impact sid1/public-export/feature/billing/approveInvoice --json
 app diff --architecture --base HEAD
+app manifest --v3 --json
+app brief billing --json
+app trace approveInvoice --json
+app tests-for billing --json
+app unknowns --json
 ```
 
 ## Migration and reference application
 
 - [Migrate to architecture manifest v2](MIGRATION.md)
 - [Reference SaaS architecture](examples/reference-saas/README.md)
+- [Full-stack reference application](examples/reference-fullstack/README.md)
 
-The reference application demonstrates stable IDs, inferred versus declared contracts, package policy, routes, events, adapters, permissions, and domain tests. Its UI module is a view model; it is not rendered frontend support.
+The compiler-only reference preserves the minimal core example. The full-stack reference proves the Next production build, server rendering, client interaction, sessions, durable in-memory work, local adapters, lifecycle commands, architecture checks, and Manifest v3 completeness without production credentials. Its PostgreSQL transaction, row-security, migration, outbox, and durable-store tests run when `TEST_DATABASE_URL` points to an isolated test database.
