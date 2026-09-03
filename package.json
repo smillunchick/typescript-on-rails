@@ -30,7 +30,12 @@
   "typescriptOnRails": {
     "packageCapabilities": {
       "typescript": "host-io"
-    }
+    },
+    "packageFactsVersion": 1,
+    "packageFacts": [
+      { "package": "typescript-on-rails", "capability": "host-io", "runtime": ["server", "build"], "effects": ["filesystem", "process"], "nondeterminism": ["environment"] },
+      { "package": "typescript", "capability": "host-io", "runtime": ["server", "build"], "effects": ["filesystem", "process"], "nondeterminism": ["environment"] }
+    ]
   },
   "engines": {
     "node": ">=22"
@@ -61,12 +66,17 @@
   "files": [
     "dist",
     "templates",
+    "!templates/**/.next/**",
+    "!templates/**/.typescript-on-rails/**",
+    "!templates/**/dist/**",
+    "!templates/**/node_modules/**",
+    "!templates/**/*.tsbuildinfo",
     "README.md",
     "MIGRATION.md",
     "LICENSE"
   ],
   "scripts": {
-    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; for (const target of ['dist', 'templates/fullstack/.next', 'templates/examples/projects/.next', 'templates/fullstack/tsconfig.tsbuildinfo', 'templates/examples/projects/tsconfig.tsbuildinfo']) rmSync(target, { recursive: true, force: true });\"",
     "build": "tsc -p tsconfig.json && node --input-type=module -e \"import { chmodSync } from 'node:fs'; chmodSync('dist/bin.js', 0o755);\"",
     "emit": "tsc -p tsconfig.json --noCheck && node --input-type=module -e \"import { chmodSync } from 'node:fs'; chmodSync('dist/bin.js', 0o755);\"",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit && tsc -p examples/reference-saas/tsconfig.json",
@@ -79,7 +89,7 @@
     "packages:runtime-build": "npm run build --workspace=@typescript-on-rails/fullstack && npm run build --workspace=@typescript-on-rails/web && npm run build --workspace=@typescript-on-rails/postgres && npm run build --workspace=@typescript-on-rails/jobs && npm run build --workspace=@typescript-on-rails/testing",
     "packages:build": "npm run packages:runtime-build && npm run build --workspace=typescript-on-rails-reference-fullstack",
     "packages:check": "npm run check --workspaces --if-present",
-    "template:check": "tsc -p templates/fullstack/tsconfig.json --noEmit --incremental false",
+    "template:check": "tsc -p templates/fullstack/tsconfig.json --noEmit --incremental false && tsc -p templates/examples/projects/tsconfig.json --noEmit --incremental false",
     "check": "npm run typecheck && npm test && npm run template:check && npm run emit && npm run architecture:check && npm run reference:check && npm run packages:check",
     "prepack": "npm run clean && npm run build",
     "prepublishOnly": "npm run check"

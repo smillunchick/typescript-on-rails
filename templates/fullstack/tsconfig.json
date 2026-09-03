@@ -8,20 +8,10 @@
     "exactOptionalPropertyTypes": true,
     "jsx": "react-jsx",
     "noEmit": true,
-    "lib": [
-      "ESNext",
-      "DOM",
-      "DOM.Iterable"
-    ],
-    "types": [
-      "node"
-    ],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["node"],
     "skipLibCheck": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
+    "plugins": [{ "name": "next" }],
     "allowJs": true,
     "incremental": true,
     "esModuleInterop": true,
@@ -32,12 +22,9 @@
     "next-env.d.ts",
     "src/**/*.ts",
     "src/**/*.tsx",
-    "tools/**/*.ts",
     "test/**/*.ts",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
-  "exclude": [
-    "node_modules"
-  ]
+  "exclude": ["node_modules"]
 }

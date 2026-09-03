@@ -1,11 +1,14 @@
 export * from "./adapter.js";
+export * from "./adapter-contracts.js";
 export * from "./architecture.js";
 export * from "./app.js";
 export * from "./composition.js";
 export * from "./errors.js";
-export * from "./event.js";
+export { createEventBus, event, type EventBus, type EventDefinition, type OwnedEventDefinition } from "./event.js";
 export * from "./executable.js";
 export * from "./model.js";
+export * from "./repository.js";
 export * from "./route.js";
 export * from "./runtime-id.js";
 export * from "./schema.js";
+export * from "./suitability.js";

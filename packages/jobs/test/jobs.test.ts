@@ -1,19 +1,37 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
-import { consumer, defineFeature, event, object, string } from "typescript-on-rails";
+import { consumer, defineFeature, event, object, runtimeRecordId, schedule, string, unit } from "typescript-on-rails";
 
 import {
   createConsumerRuntime,
   createWorker,
   dispatchOutbox,
-  durableEvent,
   memoryJobStore,
   runScheduler,
+  scheduleRuntimeBinding,
+  type DurableEvent,
   type JobHandlerContext,
   type JobStore,
 } from "../src/index.js";
 
+function testEvent<T>(definition: { readonly owner: string; readonly name: string; readonly version?: number; readonly parse: (value: unknown) => T }): DurableEvent<T> {
+  return Object.freeze({ id: runtimeRecordId("event", definition.owner, definition.name), name: definition.name, version: definition.version ?? 1, parse: definition.parse });
+}
+
+function outboxOptions(idempotencyKey: string, occurredAt = new Date(0)) {
+  return { idempotencyKey, occurredAt, requestId: `request:${idempotencyKey}`, correlationId: `correlation:${idempotencyKey}` };
+}
+
 describe("durable work runtime", () => {
+  it("keeps the applied jobs migration source unchanged", async () => {
+    const source = await readFile(new URL("../src/postgres.ts", import.meta.url), "utf8");
+    const start = source.indexOf("export const jobsMigration: Migration = {");
+    const end = source.indexOf("\n\nfunction jobStatus", start);
+    assert.ok(start >= 0 && end > start);
+    assert.equal(createHash("sha256").update(source.slice(start, end)).digest("hex"), "1bb6081ddcc8b51209bfdcc3e4639b49c98544ba7f1c7f932aff2b1831def2d2");
+  });
   it("deduplicates jobs, retries with fencing, and exposes dead letters", async () => {
     let now = new Date(0);
     const store = memoryJobStore(() => now);
@@ -62,19 +80,19 @@ describe("durable work runtime", () => {
       { code: "IDEMPOTENCY_VALUE_NOT_JSON" },
     );
 
-    const ProjectCreated = durableEvent({ name: "ProjectCreated", version: 2, parse: (value: unknown) => value });
-    const outbox = await store.appendOutbox(ProjectCreated, { project: { id: "one", active: true } }, "event:stable");
+    const ProjectCreated = testEvent({ owner: "tests", name: "ProjectCreated", version: 2, parse: (value: unknown) => value });
+    const outbox = await store.appendOutbox(ProjectCreated, { project: { id: "one", active: true } }, outboxOptions("event:stable"));
     assert.deepEqual(
-      await store.appendOutbox(ProjectCreated, { project: { active: true, id: "one" } }, "event:stable"),
+      await store.appendOutbox(ProjectCreated, { project: { active: true, id: "one" } }, outboxOptions("event:stable")),
       { id: outbox.id, replayed: true },
     );
     await assert.rejects(
-      store.appendOutbox(ProjectCreated, { project: { id: "two", active: true } }, "event:stable"),
+      store.appendOutbox(ProjectCreated, { project: { id: "two", active: true } }, outboxOptions("event:stable")),
       { code: "OUTBOX_IDEMPOTENCY_CONFLICT" },
     );
-    const ProjectCreatedV3 = durableEvent({ name: "ProjectCreated", version: 3, parse: (value: unknown) => value });
+    const ProjectCreatedV3 = testEvent({ owner: "tests", name: "ProjectCreated", version: 3, parse: (value: unknown) => value });
     await assert.rejects(
-      store.appendOutbox(ProjectCreatedV3, { project: { id: "one", active: true } }, "event:stable"),
+      store.appendOutbox(ProjectCreatedV3, { project: { id: "one", active: true } }, outboxOptions("event:stable")),
       { code: "OUTBOX_IDEMPOTENCY_CONFLICT" },
     );
 
@@ -107,17 +125,17 @@ describe("durable work runtime", () => {
     assert.equal(await store.complete(claimed.id, claimed.leaseToken), false);
     assert.equal(await store.complete(replacement.id, replacement.leaseToken), true);
 
-    const LeaseEvent = durableEvent({ name: "LeaseEvent", parse: (value: unknown) => value });
-    await store.appendOutbox(LeaseEvent, { id: "one" }, "lease:event");
-    const [outbox] = await store.dueOutbox(1, now, 10);
+    const LeaseEvent = testEvent({ owner: "tests", name: "LeaseEvent", parse: (value: unknown) => value });
+    await store.appendOutbox(LeaseEvent, { id: "one" }, outboxOptions("lease:event"));
+    const outbox = await store.claimOutbox(now, 10);
     assert.ok(outbox?.leaseToken);
     now = new Date(20);
-    assert.equal(await store.markPublished(outbox.id, outbox.leaseToken, now), false);
-    const [reclaimed] = await store.dueOutbox(1, now, 10);
+    assert.equal(await store.settleOutbox(outbox.id, outbox.leaseToken, { kind: "published", at: now }), false);
+    const reclaimed = await store.claimOutbox(now, 10);
     assert.ok(reclaimed?.leaseToken);
     assert.notEqual(reclaimed.leaseToken, outbox.leaseToken);
-    assert.equal(await store.markPublished(outbox.id, outbox.leaseToken, now), false);
-    assert.equal(await store.markPublished(reclaimed.id, reclaimed.leaseToken, now), true);
+    assert.equal(await store.settleOutbox(outbox.id, outbox.leaseToken, { kind: "published", at: now }), false);
+    assert.equal(await store.settleOutbox(reclaimed.id, reclaimed.leaseToken, { kind: "published", at: now }), true);
   });
 
   it("renews a lease while a slow handler is running", async () => {
@@ -254,28 +272,30 @@ describe("durable work runtime", () => {
     assert.equal(stale.receipt?.result, null);
   });
 
-  it("leases outbox records so concurrent dispatchers do not claim the same batch", async () => {
-    const store = memoryJobStore(() => new Date(0));
-    const Event = durableEvent({ name: "ProjectCreated", parse: (value: unknown) => value });
-    await store.appendOutbox(Event, { id: "one" }, "event:leased");
-    const [record] = await store.dueOutbox(1, new Date(0), 100);
+  it("leases one outbox record and reports a lost settlement fence", async () => {
+    let now = new Date(0);
+    const store = memoryJobStore(() => now);
+    const Event = testEvent({ owner: "tests", name: "ProjectCreated", parse: (value: unknown) => value });
+    await store.appendOutbox(Event, { id: "one" }, outboxOptions("event:leased"));
+    const record = await store.claimOutbox(now, 100);
     assert.ok(record?.leaseToken);
-    assert.deepEqual(await store.dueOutbox(1, new Date(50), 100), []);
-    assert.equal(await store.markPublished(record.id, "wrong-lease", new Date(60)), false);
-    const [reclaimed] = await store.dueOutbox(1, new Date(100), 100);
+    assert.equal(await store.claimOutbox(new Date(50), 100), undefined);
+    assert.equal(await store.settleOutbox(record.id, "wrong-lease", { kind: "published", at: new Date(60) }), false);
+    now = new Date(100);
+    const reclaimed = await store.claimOutbox(now, 100);
     assert.ok(reclaimed?.leaseToken);
     assert.notEqual(reclaimed.leaseToken, record.leaseToken);
+    assert.equal(await store.settleOutbox(reclaimed.id, reclaimed.leaseToken, { kind: "published", at: now }), true);
+    await store.appendOutbox(Event, { id: "fence" }, outboxOptions("event:fence", now));
 
-    await store.appendOutbox(Event, { id: "fence" }, "event:fence");
-    const fencedStore: JobStore = { ...store, markPublished: async () => false };
-    await assert.rejects(
-      dispatchOutbox(fencedStore, { publish: async () => undefined }, { now: () => new Date(200) }),
-      { code: "OUTBOX_FENCE_LOST" },
-    );
+    const fencedStore: JobStore = { ...store, settleOutbox: async () => false };
+    const outcome = await dispatchOutbox(fencedStore, { targets: async () => [] }, { now: () => new Date(100) });
+    assert.equal(outcome.fenceLost, 1);
+    assert.equal(outcome.published, 0);
   });
 
   it("dispatches outbox work through the exact registered consumer", async () => {
-    const ProjectCreated = event({ name: "ProjectCreated", payload: object({ projectId: string() }) });
+    const ProjectCreated = event({ owner: "projects", name: "ProjectCreated", payload: object({ projectId: string() }) });
     const received: string[] = [];
     const welcome = consumer({
       name: "sendWelcome",
@@ -289,26 +309,80 @@ describe("durable work runtime", () => {
 
     assert.equal(runtime.bindings[0]?.target, welcome);
     assert.deepEqual(Object.keys(runtime.handlers), ["projects.sendWelcome"]);
-    await store.appendOutbox(ProjectCreated, { projectId: "one" }, "project-created:one");
-    assert.equal(await dispatchOutbox(store, runtime.publisher(store), { now: () => new Date(0) }), 1);
+    await store.appendOutbox(ProjectCreated, { projectId: "one" }, outboxOptions("project-created:one"));
+    assert.equal((await dispatchOutbox(store, runtime.publisher(), { now: () => new Date(0) })).published, 1);
     assert.equal(await createWorker({ store, handlers: runtime.handlers, now: () => new Date(0) }).runOnce(new AbortController().signal), "succeeded");
     assert.deepEqual(received, ["one"]);
 
-    const Unknown = durableEvent({ name: "UnknownEvent", parse: (value: unknown) => value });
-    await store.appendOutbox(Unknown, {}, "unknown:one");
-    await assert.rejects(dispatchOutbox(store, runtime.publisher(store), { now: () => new Date(1) }), /OUTBOX_CONSUMER_NOT_REGISTERED/);
+    const Unknown = testEvent({ owner: "tests", name: "UnknownEvent", parse: (value: unknown) => value });
+    await store.appendOutbox(Unknown, {}, outboxOptions("unknown:one"));
+    const unknownResult = await dispatchOutbox(store, runtime.publisher(), { now: () => new Date(1) });
+    assert.equal(unknownResult.quarantined, 1);
+    assert.equal((await store.quarantinedOutbox())[0]?.quarantineReason, "EVENT_NOT_REGISTERED");
   });
 
-  it("materializes one schedule occurrence and dispatches outbox records once", async () => {
+  it("materializes a registered schedule into its exact consumer envelope", async () => {
+    const ReviewDue = event({ owner: "reviews", name: "ReviewDue", payload: object({ reviewId: string() }) });
+    const received: string[] = [];
+    const review = consumer({ name: "review", event: ReviewDue, durable: true, handle: ({ reviewId }) => { received.push(reviewId); } });
+    const daily = schedule({ name: "daily", feature: "reviews", target: review, occurrences: (now) => [{ occurrence: "2026-01-01", payload: { reviewId: "one" }, dueAt: now }] });
+    const feature = defineFeature({ name: "reviews", events: [ReviewDue], consumers: [review], schedules: [daily] });
+    const runtime = createConsumerRuntime([feature]);
+    const store = memoryJobStore(() => new Date(0));
+    assert.equal(scheduleRuntimeBinding(daily).target, daily);
+    assert.deepEqual(await runScheduler(store, [daily], new Date(0)), { created: 1, replayed: 0, failed: 0, failureOverflow: 0, cancelled: false, failures: [] });
+    assert.deepEqual(await runScheduler(store, [daily], new Date(1_000)), { created: 0, replayed: 1, failed: 0, failureOverflow: 0, cancelled: false, failures: [] });
+    assert.equal(await createWorker({ store, handlers: runtime.handlers, now: () => new Date(0) }).runOnce(new AbortController().signal), "succeeded");
+    assert.deepEqual(received, ["one"]);
+    const Tick = event({ owner: "reviews", name: "Tick", payload: unit() });
+    const tickTarget = consumer({ name: "tick", event: Tick, durable: true, handle: () => undefined });
+    const tick = schedule({ name: "tick", feature: "reviews", target: tickTarget, occurrences: (now) => [{ occurrence: "one", payload: undefined, dueAt: now }] });
+    const tickStore = memoryJobStore(() => new Date(0));
+    assert.equal((await runScheduler(tickStore, [tick], new Date(0))).created, 1);
+    assert.equal((await runScheduler(tickStore, [tick], new Date(1_000))).replayed, 1);
+  });
+
+  it("materializes one generic schedule occurrence and dispatches outbox records once", async () => {
     const store = memoryJobStore(() => new Date(0));
     const schedule = { name: "daily", occurrences: () => [{ schedule: "daily", occurrence: "2026-01-01", job: { name: "review", payload: {}, idempotencyKey: "review:2026-01-01" } }] };
-    assert.equal(await runScheduler(store, [schedule], new Date(0)), 1);
-    assert.equal(await runScheduler(store, [schedule], new Date(0)), 0);
-    const ReviewDue = durableEvent({ name: "ReviewDue", parse: (value: unknown) => { if (typeof value !== "object" || value === null) throw new Error("invalid"); return value; } });
-    await store.appendOutbox(ReviewDue, { reviewId: "one" }, "event:one");
+    assert.deepEqual(await runScheduler(store, [schedule], new Date(0)), { created: 1, replayed: 0, failed: 0, failureOverflow: 0, cancelled: false, failures: [] });
+    assert.deepEqual(await runScheduler(store, [schedule], new Date(0)), { created: 0, replayed: 1, failed: 0, failureOverflow: 0, cancelled: false, failures: [] });
+    const contained = await runScheduler(store, [
+      { name: "bounded", occurrences: () => [{ schedule: "x".repeat(201), occurrence: "one", job: { name: "ignored", payload: {}, idempotencyKey: "bounded" } }] },
+      { name: "broken", occurrences: () => { throw Object.assign(new Error("broken"), { code: "BROKEN_SCHEDULE" }); } },
+      { name: "later", occurrences: () => [{ schedule: "later", occurrence: "one", job: { name: "later", payload: {}, idempotencyKey: "later:one" } }] },
+      { name: "too-long", occurrences: () => [{ schedule: "too-long", occurrence: "x".repeat(101), job: { name: "ignored", payload: {}, idempotencyKey: "ignored" } }] },
+    ], new Date(0));
+    assert.deepEqual(contained, { created: 1, replayed: 0, failed: 3, failureOverflow: 0, cancelled: false, failures: [
+      { schedule: "bounded", occurrence: "one", errorCode: "SCHEDULE_NAME_INVALID" },
+      { schedule: "broken", errorCode: "BROKEN_SCHEDULE" },
+      { schedule: "too-long", occurrence: "x".repeat(100), errorCode: "SCHEDULE_OCCURRENCE_INVALID" },
+    ] });
+    const overflow = await runScheduler(store, [{
+      name: "overflow",
+      occurrences: () => Array.from({ length: 1_001 }, (_, index) => ({ schedule: "overflow", occurrence: `${String(index)}${"x".repeat(101)}`, job: { name: "ignored", payload: {}, idempotencyKey: `ignored:${String(index)}` } })),
+    }], new Date(0));
+    assert.equal(overflow.failed, 1_001);
+    assert.equal(overflow.failures.length, 1_000);
+    assert.equal(overflow.failureOverflow, 1);
+    assert.equal(overflow.cancelled, false);
+    const limited = await runScheduler(store, [{
+      name: "limited",
+      occurrences: () => [
+        { schedule: "limited", occurrence: "one", job: { name: "ignored", payload: {}, idempotencyKey: "limited:one" } },
+        { schedule: "limited", occurrence: "two", job: { name: "ignored", payload: {}, idempotencyKey: "limited:two" } },
+      ],
+    }], new Date(0), { maximumOccurrencesPerSchedule: 1 });
+    assert.deepEqual(limited, { created: 0, replayed: 0, failed: 1, failureOverflow: 0, cancelled: false, failures: [{ schedule: "limited", errorCode: "SCHEDULE_OCCURRENCE_LIMIT_EXCEEDED" }] });
+    const cancelled = new AbortController();
+    cancelled.abort();
+    assert.deepEqual(await runScheduler(store, [schedule], new Date(0), { signal: cancelled.signal }), { created: 0, replayed: 0, failed: 0, failureOverflow: 0, cancelled: true, failures: [] });
+    const ReviewDue = testEvent({ owner: "tests", name: "ReviewDue", parse: (value: unknown) => { if (typeof value !== "object" || value === null) throw new Error("invalid"); return value; } });
+    await store.appendOutbox(ReviewDue, { reviewId: "one" }, outboxOptions("event:one"));
     const published: string[] = [];
-    assert.equal(await dispatchOutbox(store, { publish: async ({ id }) => { published.push(id); } }, { now: () => new Date(1) }), 1);
-    assert.equal(await dispatchOutbox(store, { publish: async ({ id }) => { published.push(id); } }), 0);
+    const publisher = { targets: async (record: { readonly id: string }) => { published.push(record.id); return []; } };
+    assert.equal((await dispatchOutbox(store, publisher, { now: () => new Date(1) })).published, 1);
+    assert.equal((await dispatchOutbox(store, publisher)).published, 0);
     assert.equal(published.length, 1);
   });
 });

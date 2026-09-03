@@ -8,11 +8,15 @@ import { afterEach, describe, it } from "node:test";
 import ts from "typescript";
 
 import { analyzeApplication } from "../src/features/architecture/index.js";
+import { defineApp, defineFeature } from "../src/features/runtime/index.js";
 import { ManifestCompatibilityError } from "../src/features/introspection/index.js";
 import { runCli, type CliDependencies, type CommandInvocation } from "../src/features/tooling/index.js";
 import {
   createApplication,
   createGitArchitectureDiff,
+  executeProjectEdit,
+  inspectFullStackApplication,
+  planProjectEdit,
   runProjectCommand,
   GitArchitectureDiffCompatibilityError,
   type ApplicationScaffoldFileSystem,
@@ -146,7 +150,13 @@ describe("app CLI checks and lifecycle", () => {
     const success = await invoke(["check", "--json", "--with-tests"], healthy.root, { runCommand });
     assert.equal(success.code, 0);
     assert.equal(success.stderr, "");
-    assert.deepEqual(JSON.parse(success.stdout), { ok: true, diagnostics: [] });
+    const successReceipt = JSON.parse(success.stdout);
+    assert.equal(successReceipt.receiptVersion, 1);
+    assert.equal(successReceipt.kind, "check");
+    assert.equal(successReceipt.ok, true);
+    assert.deepEqual(successReceipt.diagnostics, []);
+    assert.deepEqual(successReceipt.tests, { ok: true, exitCode: 0 });
+    assert.equal(successReceipt.sha256.length, 64);
     assert.deepEqual(calls, [{ command: "npm", args: ["run", "test:app"], cwd: healthy.root, stdio: "stderr" }]);
 
     const failedTests = await invoke(["check", "--json", "--with-tests"], healthy.root, {
@@ -154,11 +164,12 @@ describe("app CLI checks and lifecycle", () => {
     });
     assert.equal(failedTests.code, 9);
     assert.equal(failedTests.stderr, "Application tests failed with exit code 9.\n");
-    assert.deepEqual(JSON.parse(failedTests.stdout), {
-      ok: false,
-      diagnostics: [],
-      tests: { ok: false, exitCode: 9 },
-    });
+    const failedReceipt = JSON.parse(failedTests.stdout);
+    assert.equal(failedReceipt.receiptVersion, 1);
+    assert.equal(failedReceipt.ok, false);
+    assert.deepEqual(failedReceipt.diagnostics, []);
+    assert.deepEqual(failedReceipt.tests, { ok: false, exitCode: 9 });
+    assert.equal(failedReceipt.sha256.length, 64);
 
     const broken = await fixture({ "src/features/billing/model.ts": `export const count: number = "wrong";` });
     const failure = await invoke(["check"], broken.root);
@@ -166,6 +177,57 @@ describe("app CLI checks and lifecycle", () => {
     assert.equal(failure.stdout, "");
     assert.match(failure.stderr, /ARCH012/);
     assert.match(failure.stderr, /Create src\/features\/billing\/index\.ts/);
+  });
+
+  it("enforces Manifest v3 completeness before full-stack lifecycle checks", async () => {
+    const complete = await fixture({ "src/features/health/index.ts": "export const healthy = true;\n" });
+    await writeFile(path.join(complete.root, "package.json"), JSON.stringify({
+      dependencies: { "@typescript-on-rails/fullstack": "0.1.0" },
+      typescriptOnRails: { packageCapabilities: {} },
+    }));
+    const calls: CommandInvocation[] = [];
+    const success = await invoke(["check", "--json"], complete.root, {
+      loadFullStackApplication: async () => defineApp({ features: [defineFeature({ name: "health" })] }),
+      resolveFullStackLifecycle: () => "/lifecycle",
+      runCommand: (invocation) => { calls.push(invocation); return 0; },
+    });
+    assert.equal(success.code, 0, success.stderr);
+    const receipt = JSON.parse(success.stdout);
+    assert.equal(receipt.executable.complete, true);
+    assert.deepEqual(receipt.fullStack, { ok: true, exitCode: 0 });
+    assert.equal(receipt.sha256.length, 64);
+    assert.equal(calls.length, 1);
+
+    calls.length = 0;
+    const withTests = await invoke(["check", "--json", "--with-tests"], complete.root, {
+      loadFullStackApplication: async () => defineApp({ features: [defineFeature({ name: "health" })] }),
+      resolveFullStackLifecycle: () => "/lifecycle",
+      runCommand: (invocation) => { calls.push(invocation); return 0; },
+    });
+    assert.equal(withTests.code, 0, withTests.stderr);
+    const withTestsReceipt = JSON.parse(withTests.stdout);
+    assert.deepEqual(withTestsReceipt.fullStack, { ok: true, exitCode: 0 });
+    assert.deepEqual(withTestsReceipt.tests, { ok: true, exitCode: 0 });
+    assert.deepEqual(calls.map(({ args }) => args), [["/lifecycle", "check"], ["/lifecycle", "test"]]);
+
+    const incomplete = await fixture({ "src/features/health/index.ts": "export function orphan() { return true; }\n" });
+    await writeFile(path.join(incomplete.root, "package.json"), JSON.stringify({
+      dependencies: { "@typescript-on-rails/fullstack": "0.1.0" },
+      typescriptOnRails: { packageCapabilities: {} },
+    }));
+    let lifecycleRan = false;
+    const failure = await invoke(["check", "--json"], incomplete.root, {
+      loadFullStackApplication: async () => defineApp({ features: [defineFeature({ name: "health" })] }),
+      resolveFullStackLifecycle: () => "/lifecycle",
+      runCommand: () => { lifecycleRan = true; return 0; },
+    });
+    const output = JSON.parse(failure.stdout);
+    assert.equal(failure.code, 1);
+    assert.equal(output.ok, false);
+    assert.equal(output.executable.complete, false);
+    assert.ok(output.executable.unknowns.some(({ kind }: { readonly kind: string }) => kind === "public-function"));
+    assert.equal(lifecycleRan, false);
+    assert.match(failure.stderr, /Manifest v3.*incomplete/i);
   });
 
   it("forwards cancellation to lifecycle child processes", async () => {
@@ -197,6 +259,66 @@ describe("app CLI checks and lifecycle", () => {
     assert.equal(check.code, 130);
     assert.equal(JSON.parse(check.stdout).cancelled, true);
     assert.doesNotMatch(check.stdout, /"ok": true/);
+  });
+
+  it("bounds application introspection child lifetime, output, and protocol", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "tor-introspection-child-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    await writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module" }));
+    const hang = path.join(root, "hang.mjs");
+    const overflow = path.join(root, "overflow.mjs");
+    const ipcOverflow = path.join(root, "ipc-overflow.mjs");
+    const malformed = path.join(root, "malformed.mjs");
+    const repeated = path.join(root, "repeated.mjs");
+    await writeFile(hang, "setInterval(() => undefined, 1000);\n");
+    await writeFile(overflow, "process.stdout.write('x'.repeat(1024)); setInterval(() => undefined, 1000);\n");
+    await writeFile(ipcOverflow, "process.send?.({ protocol: 'typescript-on-rails.application-introspection/v1', ok: false, error: { code: 'LARGE', message: 'x'.repeat(1024) } }, () => process.disconnect());\n");
+    await writeFile(malformed, "process.send?.({ nope: true }, () => process.disconnect());\n");
+    await writeFile(repeated, "process.send?.({ nope: 1 }); process.send?.({ nope: 2 }, () => process.disconnect());\n");
+
+    await assert.rejects(
+      inspectFullStackApplication(root, { childPath: hang, timeoutMilliseconds: 25 }),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "APPLICATION_INTROSPECTION_TIMEOUT",
+    );
+    await assert.rejects(
+      inspectFullStackApplication(root, { childPath: overflow, maximumOutputBytes: 32 }),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "APPLICATION_INTROSPECTION_OUTPUT_LIMIT",
+    );
+    await assert.rejects(
+      inspectFullStackApplication(root, { childPath: ipcOverflow, maximumOutputBytes: 32 }),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "APPLICATION_INTROSPECTION_OUTPUT_LIMIT",
+    );
+    await assert.rejects(
+      inspectFullStackApplication(root, { childPath: malformed }),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "APPLICATION_INTROSPECTION_INVALID_RESULT",
+    );
+    await assert.rejects(
+      inspectFullStackApplication(root, { childPath: repeated }),
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "APPLICATION_INTROSPECTION_PROTOCOL_VIOLATION",
+    );
+    const controller = new AbortController();
+    const cancelled = inspectFullStackApplication(root, { childPath: hang, signal: controller.signal });
+    controller.abort(new Error("test stop"));
+    await assert.rejects(
+      cancelled,
+      (error: unknown) => typeof error === "object" && error !== null && "code" in error && error.code === "APPLICATION_INTROSPECTION_CANCELLED",
+    );
+  });
+
+  it("exposes recovery for a failed project edit rollback", async () => {
+    const app = await fixture({ "src/features/health/index.ts": "export const healthy = true;\n" });
+    const file = path.join(app.root, "src", "features", "health", "index.ts");
+    const plan = await planProjectEdit(app.root, [{ path: "src/features/health/index.ts", content: "changed\n" }]);
+    await assert.rejects(executeProjectEdit(plan, {
+      validate: (workspace) => { if (workspace === app.root) throw new Error("post-apply failure"); },
+      testing: { beforeRestore: () => { throw new Error("restore failure"); } },
+    }), /PROJECT_EDIT_RECOVERY_REQUIRED/);
+    assert.equal(await readFile(file, "utf8"), "changed\n");
+
+    const recovered = await invoke(["recover"], app.root);
+    assert.equal(recovered.code, 0, recovered.stderr);
+    assert.equal(recovered.stdout, "recovered project edit\n");
+    assert.equal(await readFile(file, "utf8"), "export const healthy = true;\n");
   });
 
   it("returns the unknown-package inventory and starter map in JSON diagnostics", async () => {
@@ -306,8 +428,14 @@ describe("app CLI checks and lifecycle", () => {
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const unknown = await invoke(["wat"], root);
     const invalid = await invoke(["graph", "--json", "--dot"], root);
+    let inspected = false;
+    const invalidManifest = await invoke(["manifest", "--bogus"], root, {
+      inspectFullStackApplication: async () => { inspected = true; throw new Error("must not run"); },
+    });
     assert.equal(unknown.code, 2);
     assert.equal(invalid.code, 2);
+    assert.equal(invalidManifest.code, 2);
+    assert.equal(inspected, false);
     assert.match(unknown.stderr, /^Usage: app /);
     assert.match(unknown.stderr, /full-stack TypeScript framework/i);
     assert.match(unknown.stderr, /Official modular packages provide web, PostgreSQL, durable work, lifecycle, and test runtimes\./);
@@ -418,26 +546,40 @@ describe("app CLI architecture views", () => {
 });
 
 describe("app scaffold and generators", () => {
-  it("creates the full-stack path by default, keeps --core minimal, and refuses a nonempty target", async () => {
+  it("creates a neutral full-stack default, explicit projects example, and minimal --core profile", async () => {
     const parent = await mkdtemp(path.join(tmpdir(), "tor-new-"));
     cleanup.push(() => rm(parent, { recursive: true, force: true }));
     const created = await invoke(["new", "shop"], parent);
     assert.equal(created.code, 0, created.stderr);
     const packageJson = JSON.parse(await readFile(path.join(parent, "shop", "package.json"), "utf8"));
+    assert.equal(packageJson.name, "shop");
     assert.equal(packageJson.dependencies["typescript-on-rails"], "0.1.0");
-    for (const dependency of ["@typescript-on-rails/fullstack", "@typescript-on-rails/jobs", "@typescript-on-rails/postgres", "@typescript-on-rails/testing", "@typescript-on-rails/web", "next", "pg", "react", "react-dom"]) {
+    for (const dependency of ["@typescript-on-rails/fullstack", "@typescript-on-rails/web", "next", "react", "react-dom"]) {
       assert.equal(typeof packageJson.dependencies[dependency], "string", dependency);
     }
+    assert.deepEqual(packageJson.typescriptOnRails, { packageCapabilities: {} });
+    for (const dependency of ["@typescript-on-rails/jobs", "@typescript-on-rails/postgres", "pg"]) assert.equal(packageJson.dependencies[dependency], undefined);
     assert.equal(packageJson.scripts.dev, "app dev");
-    assert.equal(packageJson.scripts.check, "app check");
+    assert.equal(packageJson.scripts.check, "app check --with-tests");
     await access(path.join(parent, "shop", "fullstack.config.mjs"));
-    await access(path.join(parent, "shop", "src", "app", "api", "projects", "route.ts"));
-    await access(path.join(parent, "shop", "src", "infra", "migrations.ts"));
-    await access(path.join(parent, "shop", "test", "reference.test.ts"));
+    await access(path.join(parent, "shop", "src", "app", "api", "status", "route.ts"));
+    await access(path.join(parent, "shop", "src", "features", "status", "index.ts"));
+    await access(path.join(parent, "shop", "test", "status.test.ts"));
+    await assert.rejects(access(path.join(parent, "shop", "src", "features", "projects")), /ENOENT/);
+
+    const example = await invoke(["new", "demo", "--example", "projects"], parent);
+    assert.equal(example.code, 0, example.stderr);
+    const examplePackage = JSON.parse(await readFile(path.join(parent, "demo", "package.json"), "utf8"));
+    assert.equal(examplePackage.name, "demo");
+    assert.deepEqual(examplePackage.typescriptOnRails, { packageCapabilities: {} });
+    await access(path.join(parent, "demo", "src", "app", "api", "projects", "route.ts"));
+    await access(path.join(parent, "demo", "src", "infra", "migrations.ts"));
+    await access(path.join(parent, "demo", "test", "reference.test.ts"));
 
     const core = await invoke(["new", "kernel", "--core"], parent);
     assert.equal(core.code, 0, core.stderr);
     const corePackage = JSON.parse(await readFile(path.join(parent, "kernel", "package.json"), "utf8"));
+    assert.equal(corePackage.name, "kernel");
     assert.deepEqual(corePackage.dependencies, { "typescript-on-rails": "^0.1.0" });
     assert.deepEqual(corePackage.scripts, { check: "app check", test: "app test", "test:app": "node --test", typecheck: "tsc -p tsconfig.json" });
     assert.deepEqual((await readdir(path.join(parent, "kernel"))).sort(), ["package.json", "src", "tsconfig.json"]);
@@ -445,13 +587,23 @@ describe("app scaffold and generators", () => {
     assert.equal((await invoke(["test"], path.join(parent, "kernel"), { runCommand: (invocation) => { coreTestCalls.push(invocation); return 0; } })).code, 0);
     assert.deepEqual(coreTestCalls, [{ command: "npm", args: ["run", "test:app"], cwd: path.join(parent, "kernel") }]);
 
+    for (const invalid of [["new", "bad", "--example", "unknown"], ["new", "bad", "--core", "--example", "projects"]]) {
+      assert.equal((await invoke(invalid, parent)).code, 2);
+    }
     const refused = await invoke(["new", "shop"], parent);
     assert.equal(refused.code, 1);
     assert.match(refused.stderr, /not empty/);
   });
 
-  it("keeps the packaged full-stack source identical to the checked reference", async () => {
-    const templateRoot = path.resolve("templates/fullstack");
+  it("keeps the explicit projects example identical to the checked reference and the default neutral", async () => {
+    const neutralRoot = path.resolve("templates/fullstack");
+    const neutralEntries = await readdir(neutralRoot, { withFileTypes: true });
+    assert.deepEqual(
+      neutralEntries.map(({ name }) => name).sort(),
+      ["README.md", "fullstack.config.mjs", "gitignore", "next-env.d.ts", "next.config.mjs", "package.json", "src", "test", "tsconfig.json"],
+    );
+    assert.doesNotMatch(await readFile(path.join(neutralRoot, "README.md"), "utf8"), /projectId|developer@example/i);
+    const templateRoot = path.resolve("templates/examples/projects");
     const rootEntries = await readdir(templateRoot, { withFileTypes: true });
     assert.deepEqual(
       rootEntries.map(({ name }) => name).sort(),
@@ -463,14 +615,14 @@ describe("app scaffold and generators", () => {
     );
     for (const directory of ["src", "test", "tools"] as const) {
       const reference = path.resolve("examples/reference-fullstack", directory);
-      const template = path.resolve("templates/fullstack", directory);
+      const template = path.resolve(templateRoot, directory);
       const files = await relativeFiles(reference);
       assert.deepEqual(await relativeFiles(template), files);
       for (const file of files) assert.equal(await readFile(path.join(template, file), "utf8"), await readFile(path.join(reference, file), "utf8"), `${directory}/${file}`);
     }
     for (const file of ["fullstack.config.mjs", "next-env.d.ts", "next.config.mjs", "tsconfig.json"]) {
       assert.equal(
-        await readFile(path.resolve("templates/fullstack", file), "utf8"),
+        await readFile(path.resolve(templateRoot, file), "utf8"),
         await readFile(path.resolve("examples/reference-fullstack", file), "utf8"),
         file,
       );
@@ -544,27 +696,48 @@ describe("app scaffold and generators", () => {
     );
   });
 
-  it("creates focused idempotent feature artifacts and rejects unsafe names", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "tor-generate-"));
-    cleanup.push(() => rm(root, { recursive: true, force: true }));
-    await mkdir(path.join(root, "src", "features"), { recursive: true });
+  it("creates ownership-complete idempotent feature artifacts with explicit access", async () => {
+    const app = await fixture({
+      "src/app.ts": 'import { defineApp } from "typescript-on-rails"; export default defineApp({});\n',
+    });
+    const root = app.root;
 
     assert.equal((await invoke(["create", "feature", "billing"], root)).code, 0);
     assert.equal((await invoke(["create", "model", "InvoiceItem", "--feature", "billing"], root)).code, 0);
-    assert.equal((await invoke(["create", "action", "approveInvoice", "--feature", "billing"], root)).code, 0);
-    assert.equal((await invoke(["create", "query", "listInvoices", "--feature", "billing"], root)).code, 0);
-    assert.equal((await invoke(["create", "action", "approveInvoice", "--feature", "billing"], root)).code, 0);
+    assert.equal((await invoke(["create", "action", "approveInvoice", "--feature", "billing", "--permission", "invoice.approve"], root)).code, 0);
+    assert.equal((await invoke(["create", "query", "listInvoices", "--public", "--feature", "billing"], root)).code, 0);
+    assert.equal((await invoke(["create", "action", "approveInvoice", "--feature", "billing", "--permission", "invoice.approve"], root)).code, 0);
 
     const featureRoot = path.join(root, "src", "features", "billing");
     assert.match(await readFile(path.join(featureRoot, "invoice-item.ts"), "utf8"), /name: "InvoiceItem"/);
     const action = await readFile(path.join(featureRoot, "approve-invoice.ts"), "utf8");
-    assert.match(action, /public: true/);
-    assert.match(action, /Choose public, permission, or authorize/);
+    assert.match(action, /permission: "invoice\.approve"/);
+    assert.doesNotMatch(action, /public: true/);
+    assert.match(await readFile(path.join(featureRoot, "list-invoices.ts"), "utf8"), /public: true/);
     const index = await readFile(path.join(featureRoot, "index.ts"), "utf8");
-    assert.equal(index.match(/approveInvoice/g)?.length, 1);
+    assert.equal(index.match(/approveInvoice/g)?.length, 3);
+    assert.match(index, /defineFeature\(\{ name: "billing", models: \[InvoiceItem\], operations: \{ approveInvoice, listInvoices \} \}\)/);
     assert.match(index, /export \{ InvoiceItem \}/);
     assert.match(index, /export \{ listInvoices \}/);
+    const appSource = await readFile(path.join(root, "src", "app.ts"), "utf8");
+    assert.match(appSource, /import \{ billingFeature \} from "\.\/features\/billing\/index\.js"/);
+    assert.match(appSource, /features: \[billingFeature\]/);
     await assertGeneratedTypechecks(root);
+
+    const beforeMissingAccess = await readFile(path.join(featureRoot, "index.ts"), "utf8");
+    const missingAccess = await invoke(["create", "action", "unsafeAction", "--feature", "billing"], root);
+    assert.equal(missingAccess.code, 2);
+    assert.match(missingAccess.stderr, /--public.*--permission/);
+    assert.equal(await readFile(path.join(featureRoot, "index.ts"), "utf8"), beforeMissingAccess);
+    await assert.rejects(access(path.join(featureRoot, "unsafe-action.ts")), /ENOENT/);
+
+    const custom = await fixture({
+      "src/app.ts": 'import { defineApp } from "typescript-on-rails"; const features = []; export default defineApp({ features });\n',
+    });
+    const refusedCustom = await invoke(["create", "feature", "billing"], custom.root);
+    assert.equal(refusedCustom.code, 1);
+    assert.match(refusedCustom.stderr, /APP_REGISTRATION_SHAPE_AMBIGUOUS/);
+    await assert.rejects(access(path.join(custom.root, "src", "features", "billing")), /ENOENT/);
 
     for (const unsafe of ["../escape", "bad/name", "bad name", "-flag"]) {
       const result = await invoke(["create", "feature", unsafe], root);
@@ -573,16 +746,16 @@ describe("app scaffold and generators", () => {
 
     const boundaryBeforeInvalidNames = await readFile(path.join(featureRoot, "index.ts"), "utf8");
     for (const invalidName of ["123-report", "delete", "Class", "await"]) {
-      const result = await invoke(["create", "action", invalidName, "--feature", "billing"], root);
+      const result = await invoke(["create", "action", invalidName, "--feature", "billing", "--public"], root);
       assert.equal(result.code, 2, invalidName);
       assert.match(result.stderr, /Invalid generated identifier/);
     }
     assert.equal(await readFile(path.join(featureRoot, "index.ts"), "utf8"), boundaryBeforeInvalidNames);
 
-    const actionCollision = await invoke(["create", "action", "sendInvoice", "--feature", "billing"], root);
+    const actionCollision = await invoke(["create", "action", "sendInvoice", "--feature", "billing", "--permission", "invoice.send"], root);
     assert.equal(actionCollision.code, 0, actionCollision.stderr);
     const boundaryBeforeCollision = await readFile(path.join(featureRoot, "index.ts"), "utf8");
-    const queryCollision = await invoke(["create", "query", "send-invoice", "--feature", "billing"], root);
+    const queryCollision = await invoke(["create", "query", "send-invoice", "--feature", "billing", "--public"], root);
     assert.equal(queryCollision.code, 1);
     assert.match(queryCollision.stderr, /Generated file collision/);
     assert.equal(await readFile(path.join(featureRoot, "index.ts"), "utf8"), boundaryBeforeCollision);

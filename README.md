@@ -16,11 +16,19 @@ Official modular packages provide the full-stack runtime:
 
 - `@typescript-on-rails/web` — host-neutral HTTP and maintained Next/React bindings;
 - `@typescript-on-rails/postgres` — Kysely transactions, migrations, tenant context, ownership, seeds, and test databases;
-- `@typescript-on-rails/jobs` — durable events, outbox, jobs, retries, leases, dead letters, schedules, and reconciliation;
-- `@typescript-on-rails/fullstack` — lifecycle, configuration, secrets, observability, local adapters, and semantic briefs; and
+- `@typescript-on-rails/jobs` — experimental durable events, outbox, jobs, retries, leases, quarantine, replay, schedules, and reconciliation;
+- `@typescript-on-rails/fullstack` — lifecycle, configuration, secrets, observability, contract-backed local-only adapters, and semantic briefs; and
 - `@typescript-on-rails/testing` — operation, HTTP, PostgreSQL, job, and browser harnesses.
 
-The core does not import Next, React, PostgreSQL, or Kysely. Applications install only the official runtime packages they use. Manifest v2 analysis reads TypeScript source through the compiler API and does not import or execute application modules. In a full-stack app, the Manifest v3 CLI explicitly loads `src/app.ts` through the official TypeScript loader. Its completeness result now requires source provenance, route-to-operation links, web bindings, durable-consumer worker bindings, and non-placeholder entrypoints.
+The core does not import Next, React, PostgreSQL, or Kysely. Applications install only the official runtime packages they use. Official package metadata feeds one capability catalog for Manifest v2 policy and Manifest v3 provenance, so generated apps keep only an empty override map instead of two copied ledgers. Manifest v2 analysis reads TypeScript source through the compiler API and does not import or execute application modules. In a full-stack app, the Manifest v3 CLI explicitly loads `src/app.ts` through the official TypeScript loader. Its completeness result now requires source provenance, route-to-operation links, web bindings, durable-consumer worker bindings, and non-placeholder entrypoints.
+
+## Maturity
+
+Version 0.1 is a pre-stable local development candidate, not a production-readiness claim. The core kernel owns authoring, validation, and architecture views. The official web, PostgreSQL, full-stack, jobs, and testing packages are optional modular runtimes rather than hidden core behavior.
+
+The included identity, session, email, storage, payments, and cache adapters are deterministic local substitutes. They carry `suitability: "local-only"`, and production startup rejects them. The jobs package remains experimental and provides at-least-once work with explicit retry, quarantine, replay, and effect fencing; it does not promise exactly-once delivery.
+
+The neutral scaffold, projects example, and reference app pass local Node 22 and isolated PostgreSQL checks. They do not prove production identity, provider, cloud, migration, operating, recovery, security-review, or launch quality. The first corrected-baseline Bandwidth handoff was inconclusive because the frozen app did not pass complete Manifest v3 and no valid comparable benchmark pair existed. It supports no context-benefit or stronger maturity claim.
 
 ## Install
 
@@ -41,11 +49,19 @@ npm install
 npm run check
 ```
 
-The generated app includes Next, PostgreSQL migrations and row security, an atomic request and outbox path, registered workers and schedulers, lifecycle configuration, and tests. Copy `.env.example` to `.env` and set an isolated PostgreSQL URL before running database commands or the complete integration test.
+The generated app is a neutral Next application with one registered status feature, an operation-backed HTTP route, lifecycle configuration, and an executable-graph test. It performs no database, identity, or external-service work until you add those modules.
 
-Use `app new my-kernel --core` only when you want the minimal compiler-only scaffold.
+Use `app new demo --example projects` for the guided PostgreSQL, transactional outbox, worker, and scheduler example. Use `app new my-kernel --core` only when you want the minimal compiler-only scaffold.
 
-Define schemas and executable domain operations with explicit access rules:
+Define schemas and executable domain operations with explicit access rules. Generators require the access choice instead of making new operations public by default:
+
+```sh
+app create feature billing
+app create model Invoice --feature billing
+app create action approveInvoice --feature billing --permission invoice.approve
+app create query pricing --feature billing --public
+```
+
 
 ```ts
 import { action, object, string } from "typescript-on-rails";
@@ -171,6 +187,8 @@ app trace approveInvoice --json
 app tests-for billing --json
 app unknowns --json
 ```
+
+Briefs, traces, test views, unknowns, and check results use the same canonical selector and SHA-256 projection envelope. A simple name that matches more than one owner fails with exact candidates. Trace `links` contain only verified graph links; bounded source observations appear separately under `lexicalObservations`.
 
 ## Migration and reference application
 

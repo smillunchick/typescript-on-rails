@@ -8,6 +8,8 @@ import {
   SCHEMA_PROTOCOL_VERSION,
 } from "../../features/runtime/index.js";
 import {
+  FRAMEWORK_PACKAGE,
+  OFFICIAL_PACKAGE_PREFIX,
   PACKAGE_POLICY_RULE,
   runtimePackageIdentity,
   selectPackagePolicy,
@@ -61,8 +63,6 @@ architecture.allow({
   rule: "infrastructure-feature-boundary",
   reason: "The architecture compiler implementation consumes the architecture feature's semantic ID and manifest contracts.",
 });
-
-const FRAMEWORK_PACKAGE = "typescript-on-rails";
 
 const RULE_CODES: Readonly<Record<string, string>> = {
   "architecture-allowance": "ARCH001",
@@ -1098,13 +1098,32 @@ function typeHasAny(root: string, checker: ts.TypeChecker, type: ts.Type, visite
   return false;
 }
 
+function installedPackageName(fileName: string): string | undefined {
+  const normalized = slash(fileName);
+  const marker = "/node_modules/";
+  const index = normalized.lastIndexOf(marker);
+  if (index < 0) return undefined;
+  const [first, second] = normalized.slice(index + marker.length).split("/");
+  if (first === undefined || first.length === 0) return undefined;
+  return first.startsWith("@") && second !== undefined && second.length > 0
+    ? `${first}/${second}`
+    : first;
+}
+
+function sourceIsFrameworkPackage(fileName: string): boolean {
+  const packageName = installedPackageName(fileName);
+  return packageName === FRAMEWORK_PACKAGE
+    || packageName?.startsWith(OFFICIAL_PACKAGE_PREFIX) === true;
+}
+
 function sourceIsVendor(root: string, fileName: string): boolean {
   if (isInfra(root, fileName)) return true;
-  const normalized = slash(fileName);
-  return normalized.includes("/node_modules/")
-    && !normalized.includes(`/node_modules/${FRAMEWORK_PACKAGE}/`)
-    && !normalized.includes("/node_modules/typescript/")
-    && !normalized.includes("/node_modules/@types/");
+  if (inside(path.join(root, "src"), fileName)) return false;
+  const packageName = installedPackageName(fileName);
+  return packageName !== undefined
+    && !sourceIsFrameworkPackage(fileName)
+    && packageName !== "typescript"
+    && !packageName.startsWith("@types/");
 }
 
 function typeHasVendorOrigin(root: string, checker: ts.TypeChecker, type: ts.Type, visited: Set<ts.Type>): boolean {
@@ -1116,7 +1135,10 @@ function typeHasVendorOrigin(root: string, checker: ts.TypeChecker, type: ts.Typ
   const reference = type as ts.TypeReference;
   if ((reference.typeArguments ?? []).some((argument) => typeHasVendorOrigin(root, checker, argument, visited))) return true;
   const declarations = symbols.flatMap((symbol) => symbol.declarations ?? []);
-  if (declarations.length > 0 && declarations.every((entry) => !inside(path.join(root, "src"), entry.getSourceFile().fileName))) {
+  if (declarations.length > 0 && declarations.every((entry) => {
+    const fileName = entry.getSourceFile().fileName;
+    return !inside(path.join(root, "src"), fileName) && !sourceIsFrameworkPackage(fileName);
+  })) {
     return false;
   }
   for (const propertySymbol of checker.getPropertiesOfType(type)) {
@@ -1553,6 +1575,13 @@ export function analyzeTypeContractsWithTypescript(
   output.events.sort(compareSemantic);
   output.adapters.sort(compareSemantic);
   output.exceptions.sort(compareLocated);
+  if (selectedPolicy.derivedFromOfficialMetadata) {
+    const usedPackages = new Set(output.packageUses.map(({ package: packageName }) => packageName));
+    output.packagePolicy.splice(0, output.packagePolicy.length, ...output.packagePolicy.filter(({ package: packageName }) => {
+      if (usedPackages.has(packageName)) return true;
+      return [...usedPackages].some((used) => runtimePackageIdentity(used)?.root === packageName);
+    }));
+  }
   output.packagePolicy.sort((left, right) => compareText(left.package, right.package));
   output.packageUses.sort(comparePackageUse);
   output.diagnostics.sort((a, b) => compareLocated(a, b) || compareText(a.rule, b.rule) || compareText(a.message, b.message));

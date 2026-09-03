@@ -1,4 +1,4 @@
-import { architecture, runtimeRecordId } from "../runtime/index.js";
+import { architecture } from "../runtime/index.js";
 import {
   analyzeApplication,
   analyzeApplicationV3,
@@ -6,10 +6,15 @@ import {
   type AnalyzeApplicationV3Options,
   type ArchitectureManifest,
   type ArchitectureManifestV3,
-  type ComposedSemanticRecord,
 } from "../architecture/index.js";
 import {
   assertManifestV2,
+  createArchitectureBrief,
+  createArchitectureCheckReceipt,
+  createArchitectureTests,
+  createArchitectureTrace,
+  createArchitectureUnknowns,
+  executableArchitectureSummary,
   formatArchitectureDiff,
   formatFeatureExplanation,
   formatRouteExplanation,
@@ -17,8 +22,11 @@ import {
   graphAsText,
   inspectApplication,
   ManifestCompatibilityError,
+  resolveArchitectureSelector,
   type ApplicationInspector,
+  type AmbiguousArchitectureSelector,
   type ArchitectureDiff,
+  type MissingArchitectureSelector,
   type ResolvedSemanticSelector,
   type SemanticSelectorFailure,
 } from "../introspection/index.js";
@@ -32,7 +40,8 @@ import {
   createQuery,
   hasAppOwnedScript,
   hasFullStackLifecycle,
-  loadFullStackApplication,
+  inspectFullStackApplication,
+  recoverProjectEdit,
   resolveFullStackLifecycleBin,
   runProjectCommand,
   validateGitRef,
@@ -69,6 +78,10 @@ export interface CliDependencies {
   readonly loadFullStackApplication?: (
     root: string,
   ) => Promise<AnalyzeApplicationV3Options["application"] | undefined>;
+  readonly inspectFullStackApplication?: (
+    root: string,
+    signal?: AbortSignal,
+  ) => Promise<ArchitectureManifestV3>;
   readonly analyze?: (root: string) => ArchitectureManifest;
   readonly inspect?: (root: string) => ApplicationInspector;
   readonly architectureDiff?: (root: string, ref: string) => Promise<ArchitectureDiff>;
@@ -76,7 +89,8 @@ export interface CliDependencies {
     cwd: string,
     target: string,
     profile?: ApplicationProfile,
-  ) => Promise<{ readonly created: readonly string[]; readonly unchanged: readonly string[] }>;
+  ) => Promise<{ readonly created: readonly string[]; readonly updated: readonly string[]; readonly unchanged: readonly string[] }>;
+  readonly validateGeneratedApplication?: (root: string) => Promise<void>;
 }
 
 const usage = `Usage: app <command> [options]
@@ -86,11 +100,13 @@ Official modular packages provide web, PostgreSQL, durable work, lifecycle, and 
 Core-only applications keep the legacy lifecycle delegation path.
 
 Commands:
-  new <directory> [--core]
+  new <directory> [--core | --example projects]
   dev | build | test | migrate | worker | scheduler | seed
+  recover
   check [--json] [--with-tests]
   create feature <name>
-  create model|action|query <name> --feature <feature>
+  create model <name> --feature <feature>
+  create action|query <name> --feature <feature> (--public | --permission <permission>)
   explain <semantic-record> [--json]
   graph [--json | --dot]
   owners|boundaries|exceptions [--json]
@@ -165,6 +181,7 @@ async function runCheck(
   analyze: (root: string) => ArchitectureManifest,
   runCommand: CommandRunner,
   resolveLifecycle: (root: string) => string,
+  analyzeV3: (root: string, signal?: AbortSignal) => Promise<ArchitectureManifestV3>,
   signal?: AbortSignal,
 ): Promise<number> {
   onlyFlags(args, ["--json", "--with-tests"]);
@@ -172,47 +189,83 @@ async function runCheck(
   const withTests = oneFlag(args, "--with-tests");
   const manifest = analyze(cwd);
   assertManifestV2(manifest);
+  let executable: ReturnType<typeof executableArchitectureSummary> | undefined;
+  let lifecycleOutcome: { readonly ok: boolean; readonly exitCode: number } | undefined;
+  let testsOutcome: { readonly ok: boolean; readonly exitCode: number } | undefined;
+  const receipt = (cancelled = false) => createArchitectureCheckReceipt({
+    diagnostics: manifest.diagnostics,
+    ...(executable === undefined ? {} : { executable }),
+    ...(lifecycleOutcome === undefined ? {} : { lifecycle: lifecycleOutcome }),
+    ...(testsOutcome === undefined ? {} : { tests: testsOutcome }),
+    ...(cancelled ? { cancelled: true } : {}),
+  });
   const cancelled = (): boolean => {
     if (signal?.aborted !== true) return false;
     stderr.write("Command cancelled.\n");
-    if (asJson) json(stdout, { ok: false, diagnostics: manifest.diagnostics, cancelled: true });
+    if (asJson) json(stdout, receipt(true));
     return true;
   };
   if (cancelled()) return 130;
   const errors = manifest.diagnostics.filter((entry) => entry.severity === "error");
   for (const entry of manifest.diagnostics) stderr.write(`${formatArchitectureDiagnostic(entry)}\n`);
   if (errors.length > 0) {
-    if (asJson) json(stdout, { ok: false, diagnostics: manifest.diagnostics });
+    if (asJson) json(stdout, receipt());
     return 1;
   }
   const fullStack = await hasFullStackLifecycle(cwd);
   if (fullStack) {
-    const fullStackCode = await lifecycle("check", cwd, stderr, runCommand, resolveLifecycle, asJson ? "stderr" : "inherit", signal);
+    let manifestV3: ArchitectureManifestV3;
+    try {
+      manifestV3 = await analyzeV3(cwd, signal);
+    } catch (error) {
+      if (cancelled()) return 130;
+      throw error;
+    }
+    executable = executableArchitectureSummary(manifestV3);
+    if (!executable.complete) {
+      stderr.write("Manifest v3 executable graph is incomplete.\n");
+      for (const unknown of executable.unknowns) stderr.write(`${unknown.kind}: ${unknown.name} — ${unknown.reason}\n`);
+      if (asJson) json(stdout, receipt());
+      return 1;
+    }
+    const exitCode = await lifecycle("check", cwd, stderr, runCommand, resolveLifecycle, asJson ? "stderr" : "inherit", signal);
     if (cancelled()) return 130;
-    if (fullStackCode !== 0) {
-      if (asJson) json(stdout, { ok: false, diagnostics: manifest.diagnostics, fullStack: { ok: false, exitCode: fullStackCode } });
-      return fullStackCode;
+    lifecycleOutcome = Object.freeze({ ok: exitCode === 0, exitCode });
+    if (exitCode !== 0) {
+      if (asJson) json(stdout, receipt());
+      return exitCode;
     }
   }
   if (withTests) {
-    const testCode = fullStack
+    const exitCode = fullStack
       ? await lifecycle("test", cwd, stderr, runCommand, resolveLifecycle, asJson ? "stderr" : "inherit", signal)
       : await runCommand({ command: "npm", args: ["run", "test:app"], cwd, ...(asJson ? { stdio: "stderr" as const } : {}), ...(signal === undefined ? {} : { signal }) });
     if (cancelled()) return 130;
-    if (testCode !== 0) {
-      stderr.write(`Application tests failed with exit code ${String(testCode)}.\n`);
-      if (asJson) json(stdout, { ok: false, diagnostics: manifest.diagnostics, tests: { ok: false, exitCode: testCode } });
-      return testCode;
+    testsOutcome = Object.freeze({ ok: exitCode === 0, exitCode });
+    if (exitCode !== 0) {
+      stderr.write(`Application tests failed with exit code ${String(exitCode)}.\n`);
+      if (asJson) json(stdout, receipt());
+      return exitCode;
     }
   }
   if (cancelled()) return 130;
-  if (asJson) json(stdout, { ok: true, diagnostics: manifest.diagnostics });
+  if (asJson) json(stdout, receipt());
   else stdout.write("app check passed.\n");
   return 0;
 }
 
+function parseNew(args: readonly string[]): { readonly target: string; readonly profile: ApplicationProfile } {
+  const target = args[0];
+  if (target === undefined) throw new CliUsageError("Expected new <directory> [--core | --example projects]");
+  if (args.length === 1) return { target, profile: "fullstack" };
+  if (args.length === 2 && args[1] === "--core") return { target, profile: "core" };
+  if (args.length === 3 && args[1] === "--example" && args[2] === "projects") return { target, profile: "projects-example" };
+  throw new CliUsageError("Expected new <directory> [--core | --example projects]");
+}
+
 function renderGeneration(stdout: CliStream, result: GenerationResult): void {
   for (const file of result.created) stdout.write(`created ${file}\n`);
+  for (const file of result.updated) stdout.write(`updated ${file}\n`);
   for (const file of result.unchanged) stdout.write(`unchanged ${file}\n`);
 }
 
@@ -223,20 +276,60 @@ function parseFeatureOption(args: readonly string[]): { readonly name: string; r
   return { name: args[0], feature: args[2] };
 }
 
-async function runCreate(args: readonly string[], cwd: string, stdout: CliStream): Promise<number> {
+function parseOperationOptions(args: readonly string[]): {
+  readonly name: string;
+  readonly feature: string;
+  readonly access: { readonly public: true } | { readonly permission: string };
+} {
+  const name = args[0];
+  if (name === undefined) throw new CliUsageError("Expected <name> --feature <feature> (--public | --permission <permission>)");
+  let feature: string | undefined;
+  let access: { readonly public: true } | { readonly permission: string } | undefined;
+  for (let index = 1; index < args.length; index += 1) {
+    const option = args[index];
+    if (option === "--feature") {
+      const value = args[index + 1];
+      if (feature !== undefined || value === undefined) throw new CliUsageError("Expected one --feature <feature>");
+      feature = value;
+      index += 1;
+    } else if (option === "--public") {
+      if (access !== undefined) throw new CliUsageError("Choose exactly one of --public or --permission <permission>");
+      access = { public: true };
+    } else if (option === "--permission") {
+      const value = args[index + 1];
+      if (access !== undefined || value === undefined) throw new CliUsageError("Choose exactly one of --public or --permission <permission>");
+      access = { permission: value };
+      index += 1;
+    } else {
+      throw new CliUsageError(`Unknown option: ${String(option)}`);
+    }
+  }
+  if (feature === undefined || access === undefined) throw new CliUsageError("Expected <name> --feature <feature> (--public | --permission <permission>)");
+  return { name, feature, access };
+}
+
+async function runCreate(
+  args: readonly string[],
+  cwd: string,
+  stdout: CliStream,
+  validate: (root: string) => Promise<void>,
+): Promise<number> {
   const kind = args[0];
   if (kind === "feature") {
     if (args.length !== 2 || args[1] === undefined) throw new CliUsageError("Expected create feature <name>");
-    renderGeneration(stdout, await createFeature(cwd, args[1]));
+    renderGeneration(stdout, await createFeature(cwd, args[1], { validate }));
     return 0;
   }
   if (kind !== "model" && kind !== "action" && kind !== "query") throw new CliUsageError("Unknown generator");
-  const parsed = parseFeatureOption(args.slice(1));
-  const result = kind === "model"
-    ? await createModel(cwd, parsed.name, parsed.feature)
-    : kind === "action"
-      ? await createAction(cwd, parsed.name, parsed.feature)
-      : await createQuery(cwd, parsed.name, parsed.feature);
+  if (kind === "model") {
+    const parsed = parseFeatureOption(args.slice(1));
+    renderGeneration(stdout, await createModel(cwd, parsed.name, parsed.feature, { validate }));
+    return 0;
+  }
+  const parsed = parseOperationOptions(args.slice(1));
+  const result = kind === "action"
+    ? await createAction(cwd, parsed.name, parsed.feature, parsed.access, { validate })
+    : await createQuery(cwd, parsed.name, parsed.feature, parsed.access, { validate });
   renderGeneration(stdout, result);
   return 0;
 }
@@ -347,84 +440,20 @@ function runImpact(args: readonly string[], inspector: ApplicationInspector, std
 
 async function v3Manifest(
   cwd: string,
-  loadApplication: (
-    root: string,
-  ) => Promise<AnalyzeApplicationV3Options["application"] | undefined>,
+  analyzeV3: (root: string, signal?: AbortSignal) => Promise<ArchitectureManifestV3>,
+  signal?: AbortSignal,
 ): Promise<ArchitectureManifestV3> {
-  const application = await loadApplication(cwd);
-  return analyzeApplicationV3(cwd, application === undefined ? {} : { application });
+  return analyzeV3(cwd, signal);
 }
 
-function compositionId(record: ComposedSemanticRecord): string | undefined {
-  if (record.kind === "operation" || record.kind === "route" || record.kind === "event" || record.kind === "consumer") {
-    return runtimeRecordId(record.kind, record.owner, record.name);
-  }
-  if (record.kind === "entrypoint") return runtimeRecordId("entrypoint", "application", record.name);
-  return undefined;
-}
-
-function linkedProjection(manifest: ArchitectureManifestV3, selector: string, trace: boolean) {
-  const selected = manifest.composition.filter(({ owner, name }) => owner === selector || name === selector);
-  const seedIds = new Set(selected.map(compositionId).filter((id): id is string => id !== undefined));
-  if (trace) {
-    const eventNames = new Set<string>();
-    for (const record of selected) {
-      if (!Array.isArray(record.detail?.calls)) continue;
-      for (const call of record.detail.calls) {
-        if (typeof call === "object" && call !== null && "event" in call && typeof call.event === "string") eventNames.add(call.event);
-      }
-    }
-    for (const event of manifest.composition.filter(({ kind, name }) => kind === "event" && eventNames.has(name))) {
-      const id = compositionId(event);
-      if (id !== undefined) seedIds.add(id);
-    }
-  }
-  const ids = new Set(seedIds);
-  if (trace) {
-    type Link = ArchitectureManifestV3["linkage"]["links"][number];
-    const incoming = new Map<string, Link[]>();
-    const outgoing = new Map<string, Link[]>();
-    for (const link of manifest.linkage.links) {
-      const incomingLinks = incoming.get(link.to) ?? [];
-      incomingLinks.push(link);
-      incoming.set(link.to, incomingLinks);
-      const outgoingLinks = outgoing.get(link.from) ?? [];
-      outgoingLinks.push(link);
-      outgoing.set(link.from, outgoingLinks);
-    }
-    const queue = [...seedIds];
-    for (let index = 0; index < queue.length; index += 1) {
-      const id = queue[index];
-      if (id === undefined) continue;
-      for (const link of incoming.get(id) ?? []) {
-        if (ids.has(link.from)) continue;
-        ids.add(link.from);
-        queue.push(link.from);
-      }
-      if (id.startsWith("entrypoint/") && !seedIds.has(id)) continue;
-      for (const link of outgoing.get(id) ?? []) {
-        if (ids.has(link.to)) continue;
-        ids.add(link.to);
-        queue.push(link.to);
-      }
-    }
-  } else {
-    for (const link of manifest.linkage.links) {
-      if (!seedIds.has(link.from) && !seedIds.has(link.to)) continue;
-      ids.add(link.from);
-      ids.add(link.to);
-    }
-  }
-  const links = manifest.linkage.links.filter(({ from, to }) => ids.has(from) && ids.has(to) && (trace || seedIds.has(from) || seedIds.has(to)));
-  const records = manifest.composition.filter((record) => {
-    const id = compositionId(record);
-    return selected.includes(record) || (id !== undefined && ids.has(id));
-  });
-  return { records, links };
-}
-
-function completenessSummary(manifest: ArchitectureManifestV3) {
-  return Object.freeze({ complete: manifest.completeness.complete, counts: manifest.completeness.counts });
+function formatArchitectureProjectionFailure(
+  result: AmbiguousArchitectureSelector | MissingArchitectureSelector,
+): string {
+  if (result.status === "not-found") return `No architecture record matches selector ${result.selector}.\n`;
+  return [
+    `Ambiguous architecture selector ${result.selector}. Candidates:`,
+    ...result.candidates.map((entry) => `  ${entry.qualifiedSelector} (${entry.displayName})`),
+  ].join("\n") + "\n";
 }
 
 async function renderV3Projection(
@@ -432,71 +461,52 @@ async function renderV3Projection(
   args: readonly string[],
   cwd: string,
   stdout: CliStream,
-  loadApplication: (
-    root: string,
-  ) => Promise<AnalyzeApplicationV3Options["application"] | undefined>,
+  stderr: CliStream,
+  analyzeV3: (root: string, signal?: AbortSignal) => Promise<ArchitectureManifestV3>,
+  signal?: AbortSignal,
 ): Promise<number> {
-  const manifest = await v3Manifest(cwd, loadApplication);
-  const asJson = args.includes("--json");
   if (command === "manifest") {
     onlyFlags(args, ["--v3", "--json"]);
     if (!args.includes("--v3")) throw new CliUsageError("Expected manifest --v3");
-    json(stdout, manifest);
+    oneFlag(args, "--json");
+    json(stdout, await v3Manifest(cwd, analyzeV3, signal));
     return 0;
   }
+  const invalidOption = args.find((entry) => entry.startsWith("--") && entry !== "--json");
+  if (invalidOption !== undefined) throw new CliUsageError(`Unknown option: ${invalidOption}`);
+  const asJson = oneFlag(args, "--json");
   const positional = args.filter((entry) => entry !== "--json");
+  if (command === "unknowns" && positional.length > 0) throw new CliUsageError("unknowns accepts only --json");
+  if (command !== "unknowns" && (positional[0] === undefined || positional.length !== 1)) throw new CliUsageError(`Expected ${command} <selector>`);
+  const manifest = await v3Manifest(cwd, analyzeV3, signal);
   if (command === "unknowns") {
-    if (positional.length > 0) throw new CliUsageError("unknowns accepts only --json");
-    const unknowns = manifest.completeness.observations.filter(({ category }) => category !== "declared");
-    const value = { ...completenessSummary(manifest), unknowns };
-    if (asJson) json(stdout, value); else stdout.write(formatList(unknowns));
+    const report = createArchitectureUnknowns(manifest);
+    if (asJson) json(stdout, report); else stdout.write(formatList(report.unknowns));
     return 0;
   }
   const selector = positional[0];
-  if (selector === undefined || positional.length !== 1) throw new CliUsageError(`Expected ${command} <selector>`);
-  const projection = linkedProjection(manifest, selector, command === "trace");
-  const owners = new Set(projection.records.map(({ owner }) => owner).filter((owner) => owner !== "application"));
-  const dependencies = manifest.base.dependencies.filter(({ from, to }) => owners.has(from) || owners.has(to));
+  if (selector === undefined) throw new CliUsageError(`Expected ${command} <selector>`);
+  const selected = resolveArchitectureSelector(manifest, selector);
+  if (selected.status !== "resolved") {
+    stderr.write(formatArchitectureProjectionFailure(selected));
+    if (asJson) json(stdout, selected);
+    return 1;
+  }
   if (command === "brief") {
-    const value = {
-      version: 2,
-      selector,
-      records: projection.records,
-      links: projection.links,
-      dependencies,
-      completeness: completenessSummary(manifest),
-      sourceBodiesIncluded: false,
-      contextBenefitClaim: false,
-    };
-    if (asJson) json(stdout, value); else stdout.write(`${projection.records.map(({ kind, owner, name }) => `${kind} ${owner}.${name}`).join("\n")}\n`);
-    return projection.records.length > 0 ? 0 : 1;
+    const report = createArchitectureBrief(manifest, selected);
+    if (asJson) json(stdout, report); else stdout.write(`${report.records.map(({ kind, owner, name }) => `${kind} ${owner}.${name}`).join("\n")}\n`);
+    return report.records.length > 0 ? 0 : 1;
   }
   if (command === "tests-for") {
-    if (manifest.base.features.some(({ name }) => name === selector)) owners.add(selector);
-    const missing = new Set(manifest.completeness.observations.filter(({ kind }) => kind === "test-source").map(({ name }) => name));
-    const tests = manifest.composition
-      .filter(({ kind, owner }) => kind === "test" && owners.has(owner))
-      .map(({ owner, name }) => ({ file: name, owner, verification: missing.has(name) ? "missing" : "source-exists" }))
-      .sort((left, right) => left.file.localeCompare(right.file));
-    if (asJson) json(stdout, { selector, tests, completeness: completenessSummary(manifest) });
-    else stdout.write(formatList(tests.map(({ file, verification }) => `${file} (${verification})`)));
-    return tests.some(({ verification }) => verification === "missing") ? 1 : 0;
+    const report = createArchitectureTests(manifest, selected, { kind: "completeness" });
+    if (asJson) json(stdout, report);
+    else stdout.write(formatList(report.tests.map(({ file, verification }) => `${file} (${verification})`)));
+    return report.tests.some(({ verification }) => verification === "missing") ? 1 : 0;
   }
-  const calls = projection.records.flatMap((record) => Array.isArray(record.detail?.calls) ? record.detail.calls : []);
-  const value = {
-    version: 1,
-    selector,
-    traceKind: "verified-static-linkage",
-    records: projection.records,
-    links: projection.links,
-    calls,
-    dependencies,
-    completeness: completenessSummary(manifest),
-    staticTraceAvailable: projection.links.length > 0,
-    runtimeTraceAvailable: false,
-  };
-  if (asJson) json(stdout, value); else stdout.write(formatList(projection.links.map(({ kind, from, to }) => `${kind}: ${from} -> ${to}`)));
-  return projection.records.length > 0 ? 0 : 1;
+  const report = createArchitectureTrace(manifest, selected);
+  if (asJson) json(stdout, report);
+  else stdout.write(formatList(report.links.map(({ kind, from, to }) => `${kind}: ${from} -> ${to}`)));
+  return report.records.length > 0 ? 0 : 1;
 }
 
 function parseDiff(args: readonly string[]): { readonly base: string; readonly asJson: boolean } {
@@ -528,6 +538,7 @@ function isUsageFailure(error: unknown): boolean {
   return error instanceof Error
     && (error.message.startsWith("Invalid name:")
       || error.message.startsWith("Invalid generated identifier")
+      || error.message.startsWith("Invalid generated permission")
       || error.message.startsWith("Invalid target directory:")
       || error.message.startsWith("Invalid feature name:"));
 }
@@ -551,11 +562,29 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
   const signal = dependencies.signal;
   const runCommand = dependencies.runCommand ?? runProjectCommand;
   const resolveLifecycle = dependencies.resolveFullStackLifecycle ?? resolveFullStackLifecycleBin;
-  const loadApplication =
-    dependencies.loadFullStackApplication ??
-    (async (root: string) =>
-      (await hasFullStackLifecycle(root)) ? loadFullStackApplication(root) : undefined);
+  const analyzeV3 = dependencies.inspectFullStackApplication ?? (async (root: string, childSignal?: AbortSignal) => {
+    if (dependencies.loadFullStackApplication !== undefined) {
+      const application = await dependencies.loadFullStackApplication(root);
+      return analyzeApplicationV3(root, application === undefined ? {} : { application });
+    }
+    return (await hasFullStackLifecycle(root))
+      ? inspectFullStackApplication(root, childSignal === undefined ? {} : { signal: childSignal })
+      : analyzeApplicationV3(root);
+  });
   const analyze = dependencies.analyze ?? analyzeApplication;
+  const validateGeneratedApplication = dependencies.validateGeneratedApplication ?? (async (root: string) => {
+    const manifest = analyze(root);
+    assertManifestV2(manifest);
+    const errors = manifest.diagnostics.filter(({ severity }) => severity === "error");
+    if (errors.length > 0) throw new Error(`Generated application failed Manifest v2 validation: ${errors.map(({ code }) => code).join(", ")}`);
+    if (await hasFullStackLifecycle(root)) {
+      const manifestV3 = await analyzeV3(root, signal);
+      const executable = executableArchitectureSummary(manifestV3);
+      if (!executable.complete) {
+        throw new Error(`Generated application failed Manifest v3 validation: ${executable.unknowns.map(({ kind, name }) => `${kind}:${name}`).join(", ")}`);
+      }
+    }
+  });
   const inspect = dependencies.inspect ?? inspectApplication;
   const architectureDiff = dependencies.architectureDiff ?? createGitArchitectureDiff;
   const scaffoldApplication = dependencies.createApplication ?? createApplication;
@@ -564,10 +593,14 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
     const rest = args.slice(1);
     if (command === undefined) throw new CliUsageError("Missing command");
     if (command === "new") {
-      if ((rest.length !== 1 && rest.length !== 2) || rest[0] === undefined || (rest.length === 2 && rest[1] !== "--core")) {
-        throw new CliUsageError("Expected new <directory> [--core]");
-      }
-      renderGeneration(stdout, await scaffoldApplication(cwd, rest[0], rest[1] === "--core" ? "core" : "fullstack"));
+      const parsed = parseNew(rest);
+      renderGeneration(stdout, await scaffoldApplication(cwd, parsed.target, parsed.profile));
+      return 0;
+    }
+    if (command === "recover") {
+      if (rest.length !== 0) throw new CliUsageError("recover accepts no arguments");
+      await recoverProjectEdit(cwd);
+      stdout.write("recovered project edit\n");
       return 0;
     }
     if (command === "dev" || command === "build" || command === "test" || command === "migrate" || command === "worker" || command === "scheduler" || command === "seed") {
@@ -575,8 +608,8 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       const code = await lifecycle(command, cwd, stderr, runCommand, resolveLifecycle, "inherit", signal);
       return signal?.aborted === true ? 130 : code;
     }
-    if (command === "check") return await runCheck(rest, cwd, stdout, stderr, analyze, runCommand, resolveLifecycle, signal);
-    if (command === "create") return await runCreate(rest, cwd, stdout);
+    if (command === "check") return await runCheck(rest, cwd, stdout, stderr, analyze, runCommand, resolveLifecycle, analyzeV3, signal);
+    if (command === "create") return await runCreate(rest, cwd, stdout, validateGeneratedApplication);
     if (command === "explain") return runExplain(rest, inspect(cwd), stdout, stderr);
     if (command === "graph") return runGraph(rest, inspect(cwd), stdout);
     if (command === "owners" || command === "boundaries" || command === "exceptions") {
@@ -591,7 +624,7 @@ export async function runCli(args: readonly string[], dependencies: CliDependenc
       return 0;
     }
     if (command === "manifest" || command === "brief" || command === "trace" || command === "tests-for" || command === "unknowns") {
-      return await renderV3Projection(command, rest, cwd, stdout, loadApplication);
+      return await renderV3Projection(command, rest, cwd, stdout, stderr, analyzeV3, signal);
     }
     throw new CliUsageError(`Unknown command: ${command}`);
   } catch (error) {

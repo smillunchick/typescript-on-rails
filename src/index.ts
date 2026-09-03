@@ -1,6 +1,7 @@
 export {
   analyzeApplication,
   analyzeApplicationV3,
+  APPLICATION_INTROSPECTION_PROTOCOL,
   architecture,
   migrateManifestV2,
   migratePackageCapabilityV1,
@@ -10,6 +11,9 @@ export {
 } from "./features/architecture/index.js";
 export type {
   AnalyzeApplicationV3Options,
+  ApplicationIntrospectionFailure,
+  ApplicationIntrospectionResult,
+  ApplicationIntrospectionSuccess,
   ArchitectureManifestV3,
   CompletenessObservation,
   ComposedSemanticRecord,

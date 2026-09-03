@@ -6,9 +6,12 @@ import {
   analyzeApplicationV3,
   defineApp,
   defineFeature,
+  defineModel,
   diffArchitectureV3,
+  emailContract,
   entrypoint,
   event,
+  implementAdapter,
   migrateManifestV2,
   migratePackageCapabilityV1,
   resolvePackageCapabilitiesV2,
@@ -22,21 +25,30 @@ import { createAppFixture } from "./helpers/app-fixture.js";
 describe("Manifest v3 executable application graph", () => {
   it("adds executable composition without changing Manifest v2", async () => {
     const fixture = await createAppFixture({
-      "src/features/billing/index.ts": "export function invoiceTotal() { return 1; }\n",
+      "src/features/billing/index.ts": "export { Invoice } from './model.js'; export function invoiceTotal() { return 1; }\n",
+      "src/features/billing/model.ts": "import { defineModel, string } from 'typescript-on-rails'; export const Invoice = defineModel({ name: 'Invoice', fields: { id: string() } });\n",
       "src/app/api/health/route.ts": "export function GET() { return new Response('ok'); }\n",
+      "test/billing.test.ts": "export {};\n",
     });
     try {
+      const Invoice = defineModel({ name: "Invoice", fields: { id: string() } });
       const InvoicePaid = event({ name: "InvoicePaid", payload: object({ invoiceId: string() }) });
       const health = route({ method: "GET", path: "/api/health", public: true, output: object({ status: string() }), handler: () => ({ status: "ok" }) });
+      const email = implementAdapter(emailContract, {
+        send: ({ idempotencyKey }) => ({ messageId: idempotencyKey, replayed: false }),
+      }, { provider: "test", suitability: "production" });
       const createInvoice = action({ input: object({ name: string() }), permission: "invoice.create", run: ({ name }) => ({ name }) });
       const app = defineApp({
+        adapters: { email },
         features: [defineFeature({
           name: "billing",
+          models: [Invoice],
           operations: { createInvoice },
           routes: [health],
           pages: [page({ name: "invoices", path: "/invoices", runtime: "hybrid", permission: "invoice.read" })],
           permissions: ["invoice.create", "invoice.read"],
           events: [InvoicePaid],
+          adapters: [emailContract],
           tests: ["test/billing.test.ts"],
         })],
         entrypoints: { web: entrypoint({ name: "web", process: "web", run: () => undefined }) },
@@ -44,20 +56,72 @@ describe("Manifest v3 executable application graph", () => {
       const v3 = analyzeApplicationV3(fixture.root, { application: app });
       assert.equal(v3.version, 3);
       assert.equal(v3.base.version, 2);
+      assert.equal(v3.compiler.compositionProtocolVersion, 4);
+      assert.ok(v3.composition.some((record) => record.kind === "model" && record.name === "Invoice" && record.detail?.source !== undefined));
       assert.ok(v3.composition.some((record) => record.kind === "operation" && record.name === "createInvoice"));
       assert.ok(v3.composition.some((record) => record.kind === "entrypoint" && record.name === "web"));
+      assert.ok(v3.composition.some((record) => record.kind === "adapter" && record.owner === "billing" && record.detail?.role === "required"));
+      assert.deepEqual(v3.composition.find((record) => record.kind === "adapter" && record.owner === "application")?.detail, {
+        role: "registered",
+        provider: "test",
+        suitability: "production",
+        operations: ["send"],
+      });
+      assert.equal(v3.linkage.protocolVersion, 4);
       assert.equal(v3.completeness.counts["discovered-undeclared"], 0);
       assert.ok(v3.completeness.counts.unknown >= 1);
-      assert.ok(v3.completeness.observations.some(({ kind }) => kind === "operation-calls"));
-      assert.deepEqual(v3.linkage.links, []);
+      assert.ok(v3.completeness.observations.some(({ kind }) => kind === "operation-context-observations"));
+      assert.deepEqual(v3.linkage.links, [{
+        kind: "feature-adapter",
+        from: "rid1/adapter/billing/email",
+        to: "rid1/adapter/application/email",
+      }]);
       assert.equal(v3.completeness.complete, false);
+      const missingModel = analyzeApplicationV3(fixture.root, { application: defineApp({ features: [defineFeature({ name: "billing" })] }) });
+      assert.ok(missingModel.completeness.observations.some(({ category, kind, name }) => category === "discovered-undeclared" && kind === "model" && name === "billing.Invoice"));
       const migrated = migrateManifestV2(v3.base);
       assert.equal(migrated.base, v3.base);
       assert.equal(migrated.completeness.complete, false);
       assert.deepEqual(migrated.linkage.links, []);
+      assert.equal(migrated.linkage.protocolVersion, 4);
     } finally {
       await fixture.cleanup();
     }
+  });
+
+  it("reports bounded lexical context observations without runtime reachability claims", async () => {
+    const fixture = await createAppFixture({
+      "src/features/observe/index.ts": [
+        'import { action, object, type ExecutionContext } from "typescript-on-rails";',
+        'interface Context extends ExecutionContext { outbox: { append(value: unknown): void }; email: { send(): void }; nested: { run(): void }; dead: { run(): void } }',
+        'export const inspect = action({ input: object({}), public: true, run: (_input, context: Context) => {',
+        '  const alias = context.outbox;',
+        '  alias.append({});',
+        '  context["email"].send();',
+        '  const contextCache = { send() {} };',
+        '  contextCache["send"]();',
+        '  const helper = () => context.nested.run();',
+        '  if (false) context.dead.run();',
+        '  helper();',
+        '  return true;',
+        '} });',
+      ].join("\n") + "\n",
+    });
+    try {
+      const inspect = action({ input: object({}), public: true, run: () => true });
+      const application = defineApp({ features: [defineFeature({ name: "observe", operations: { inspect } })] });
+      const manifest = analyzeApplicationV3(fixture.root, { application });
+      const detail = manifest.composition.find(({ kind, name }) => kind === "operation" && name === "inspect")?.detail;
+      assert.equal(detail?.contextObservationResolution, "resolved");
+      const observations = detail?.contextObservations as readonly { readonly member: string; readonly state: string; readonly scope: string; readonly runtimeReachability: string }[];
+      assert.deepEqual(observations.map(({ member, state, scope, runtimeReachability }) => ({ member, state, scope, runtimeReachability })), [
+        { member: "context.outbox", state: "alias-unresolved", scope: "run-body", runtimeReachability: "unknown" },
+        { member: "context[computed].send", state: "computed-unresolved", scope: "run-body", runtimeReachability: "unknown" },
+        { member: "context.nested.run", state: "direct", scope: "nested-function", runtimeReachability: "unknown" },
+        { member: "context.dead.run", state: "direct", scope: "run-body", runtimeReachability: "unknown" },
+      ]);
+      assert.deepEqual(manifest.linkage.links, []);
+    } finally { await fixture.cleanup(); }
   });
 
   it("analyzes support roots and diffs v3 composition", async () => {
@@ -89,6 +153,10 @@ describe("Manifest v3 executable application graph", () => {
     const inherited = resolvePackageCapabilitiesV2("support", [], [migratePackageCapabilityV1("date-fns", "pure", "4.1.0")]);
     assert.equal(inherited[0]?.inheritedFrom, "parent");
     assert.equal(resolvePackageCapabilitiesV2("support", [{ ...migratePackageCapabilityV1("date-fns", "pure", "4.2.0"), runtime: ["server"] }], inherited).length, 2);
+    assert.throws(
+      () => resolvePackageCapabilitiesV2("support", [{ ...migratePackageCapabilityV1("date-fns", "pure", "4.1.0"), effects: ["network"] }], inherited),
+      /Conflicting package capability v2 decision/,
+    );
     const firstInherited = inherited[0];
     assert.ok(firstInherited);
     assert.throws(
@@ -134,6 +202,8 @@ describe("Manifest v3 executable application graph", () => {
         }],
       });
       assert.equal(declared.packageCapabilities[0]?.provenance, "declared-v2");
+      assert.equal(declared.packageCapabilities[0]?.source, "options-v2");
+      assert.equal(declared.packageCapabilities[0]?.versionSource, "installed");
 
       const stale = analyzeApplicationV3(fixture.root, {
         packageCapabilitiesV2: [
@@ -143,8 +213,8 @@ describe("Manifest v3 executable application graph", () => {
           migratePackageCapabilityV1("node:os", "pure", process.versions.node),
         ],
       });
-      assert.ok(stale.completeness.observations.some(({ kind, name, reason }) => kind === "package-version" && name === "example-package/subpath" && /configured version 0\.0\.0/.test(reason)));
-      assert.ok(stale.completeness.observations.some(({ kind, name, reason }) => kind === "package-version" && name === "example-package" && /installed version 1\.2\.3/.test(reason)));
+      assert.ok(stale.completeness.observations.some(({ kind, name, reason }) => kind === "package-capability" && name === "example-package/subpath" && /conflicting application package facts/i.test(reason)));
+      assert.ok(stale.completeness.observations.some(({ kind, name, reason }) => kind === "package-capability" && name === "example-package" && /explicit packageCapabilities enforcement decision/i.test(reason)));
       assert.equal(stale.completeness.complete, false);
 
       const migrated = migrateManifestV2(manifest.base);

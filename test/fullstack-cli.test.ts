@@ -47,21 +47,33 @@ describe("full-stack CLI", () => {
         "export const total = action({ input: object({}), public: true, run: () => 1 });",
         'export const endpoint = operationRoute({ method: "GET", path: "/api/billing", operation: total });',
       ].join("\n") + "\n",
+      "src/features/health/index.ts": [
+        'import { action, object, operationRoute } from "typescript-on-rails";',
+        "export const health = action({ input: object({}), public: true, run: () => true });",
+        'export const healthEndpoint = operationRoute({ method: "GET", path: "/api/health", operation: health });',
+      ].join("\n") + "\n",
       "src/app-definition.ts": 'import { entrypoint } from "typescript-on-rails"; export const web = entrypoint({ name: "web", process: "web", run: async (signal) => { if (signal.aborted) return; await Promise.resolve(); } });\n',
       "src/app/api/billing/route.ts": "export function GET() { return new Response('ok'); }\n",
+      "src/app/api/health/route.ts": "export function GET() { return new Response('ok'); }\n",
       "test/billing.test.ts": 'import "../src/features/billing/index.js";\n',
     });
     try {
       const read = action({ input: object({}), public: true, run: () => 1 });
       const endpoint = operationRoute({ method: "GET", path: "/api/billing", operation: read });
       const binding = runtimeBinding({ name: "billing", protocol: "web.route/v1", process: "web", target: endpoint });
+      const health = action({ input: object({}), public: true, run: () => true });
+      const healthEndpoint = operationRoute({ method: "GET", path: "/api/health", operation: health });
+      const healthBinding = runtimeBinding({ name: "health", protocol: "web.route/v1", process: "web", target: healthEndpoint });
       const application = defineApp({
-        features: [defineFeature({ name: "billing", operations: { total: read }, routes: [endpoint], tests: ["test/billing.test.ts"] })],
+        features: [
+          defineFeature({ name: "billing", operations: { total: read }, routes: [endpoint], tests: ["test/billing.test.ts"] }),
+          defineFeature({ name: "health", operations: { health }, routes: [healthEndpoint] }),
+        ],
         entrypoints: {
           web: entrypoint({
             name: "web",
             process: "web",
-            bindings: [binding],
+            bindings: [binding, healthBinding],
             run: async (signal) => { if (signal.aborted) return; await Promise.resolve(); },
           }),
         },
@@ -75,9 +87,13 @@ describe("full-stack CLI", () => {
         completeness: { complete: boolean; counts: Record<string, number>; observations?: unknown };
         sourceBodiesIncluded: boolean;
         contextBenefitClaim: boolean;
+        projectionVersion: number;
+        sha256: string;
       };
       assert.equal(brief.sourceBodiesIncluded, false);
       assert.equal(brief.contextBenefitClaim, false);
+      assert.equal(brief.projectionVersion, 2);
+      assert.equal(brief.sha256.length, 64);
       assert.equal(brief.completeness.complete, true);
       assert.equal(brief.completeness.observations, undefined);
       assert.ok(brief.records.length > 0);
@@ -85,20 +101,28 @@ describe("full-stack CLI", () => {
 
       const traceOutput = stream();
       assert.equal(await runCli(["trace", "total", "--json"], { cwd: fixture.root, stdout: traceOutput, loadFullStackApplication }), 0);
-      const trace = JSON.parse(traceOutput.value()) as { staticTraceAvailable: boolean; runtimeTraceAvailable: boolean; links: { kind: string }[] };
+      const trace = JSON.parse(traceOutput.value()) as { projectionVersion: number; sha256: string; staticTraceAvailable: boolean; runtimeTraceAvailable: boolean; links: { kind: string }[]; records: { name: string }[]; lexicalObservations: unknown[] };
+      assert.equal(trace.projectionVersion, 2);
+      assert.equal(trace.sha256.length, 64);
       assert.equal(trace.staticTraceAvailable, true);
       assert.equal(trace.runtimeTraceAvailable, false);
       assert.deepEqual(trace.links.map(({ kind }) => kind), ["entrypoint-route", "route-operation"]);
+      assert.ok(!trace.records.some(({ name }) => name === "health" || name === "GET /api/health"));
 
       const unknownOutput = stream();
       assert.equal(await runCli(["unknowns", "--json"], { cwd: fixture.root, stdout: unknownOutput, loadFullStackApplication }), 0);
-      const unknowns = JSON.parse(unknownOutput.value()) as { complete: boolean; counts: Record<string, number>; unknowns: unknown[] };
+      const unknowns = JSON.parse(unknownOutput.value()) as { projectionVersion: number; sha256: string; complete: boolean; counts: Record<string, number>; unknowns: unknown[] };
+      assert.equal(unknowns.projectionVersion, 2);
+      assert.equal(unknowns.sha256.length, 64);
       assert.equal(unknowns.complete, true);
       assert.deepEqual(unknowns.unknowns, []);
 
       const testsOutput = stream();
       assert.equal(await runCli(["tests-for", "billing", "--json"], { cwd: fixture.root, stdout: testsOutput, loadFullStackApplication }), 0);
-      assert.deepEqual((JSON.parse(testsOutput.value()) as { tests: unknown[] }).tests, [{ file: "test/billing.test.ts", owner: "billing", verification: "source-exists" }]);
+      const testReport = JSON.parse(testsOutput.value()) as { projectionVersion: number; sha256: string; tests: unknown[] };
+      assert.equal(testReport.projectionVersion, 2);
+      assert.equal(testReport.sha256.length, 64);
+      assert.deepEqual(testReport.tests, [{ file: "test/billing.test.ts", owner: "billing", verification: "source-exists" }]);
 
       const manifestOutput = stream();
       assert.equal(await runCli(["manifest", "--v3", "--json"], { cwd: fixture.root, stdout: manifestOutput, loadFullStackApplication }), 0);

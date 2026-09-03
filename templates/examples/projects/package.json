@@ -1,0 +1,47 @@
+{
+  "name": "agent-native-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.7" },
+  "scripts": {
+    "dev": "app dev",
+    "build": "app build",
+    "test": "app test",
+    "check": "app check --with-tests",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "migrate": "app migrate",
+    "worker": "app worker",
+    "scheduler": "app scheduler",
+    "seed": "app seed",
+    "dev:runtime": "next dev --experimental-https --hostname localhost --port 3420",
+    "build:runtime": "next build",
+    "test:runtime": "node --import tsx --test",
+    "check:runtime": "tsc -p tsconfig.json --noEmit",
+    "migrate:runtime": "node --import tsx tools/migrate.ts",
+    "seed:runtime": "node --import tsx tools/seed.ts"
+  },
+  "dependencies": {
+    "@typescript-on-rails/fullstack": "0.1.0",
+    "@typescript-on-rails/jobs": "0.1.0",
+    "@typescript-on-rails/postgres": "0.1.0",
+    "@typescript-on-rails/testing": "0.1.0",
+    "@typescript-on-rails/web": "0.1.0",
+    "kysely": "0.29.4",
+    "next": "16.3.3",
+    "pg": "8.22.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "typescript-on-rails": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "tsx": "4.23.12",
+    "typescript": "5.9.3"
+  },
+  "typescriptOnRails": {
+    "packageCapabilities": {}
+  }
+}

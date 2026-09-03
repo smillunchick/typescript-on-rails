@@ -7,4 +7,4 @@ export const payments = implementAdapter(Payments, {
     accepted: true,
     reference: `payment:${invoiceId}`,
   }),
-});
+}, { provider: "reference-memory", suitability: "local-only" });

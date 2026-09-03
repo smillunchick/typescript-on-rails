@@ -1,4 +1,4 @@
-import { action, object, string, type EventDefinition, type ExecutionContext } from "typescript-on-rails";
+import { action, object, string, type OwnedEventDefinition, type ExecutionContext } from "typescript-on-rails";
 
 import { ProjectCreated } from "./events.js";
 import { Project } from "./model.js";
@@ -8,7 +8,7 @@ interface ProjectCommandContext extends ExecutionContext {
   readonly tenantId: string;
   readonly projects: ProjectRepository;
   readonly outbox: {
-    appendOutbox<T>(event: EventDefinition<T>, payload: T, idempotencyKey: string): Promise<unknown>;
+    appendOutbox<T>(event: OwnedEventDefinition<T>, payload: T, idempotencyKey: string): Promise<unknown>;
   };
 }
 

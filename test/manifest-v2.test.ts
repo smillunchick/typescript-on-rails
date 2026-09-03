@@ -190,10 +190,11 @@ export const Email = defineAdapterContract({ name: "Email", operations: { send: 
 import { boolean, defineAdapterContract, implementAdapter, object, string } from "typescript-on-rails";
 import { Email as ImportedEmail } from "./contracts.js";
 const LocalEmail = ImportedEmail;
-export const email = implementAdapter((LocalEmail satisfies typeof LocalEmail), { send: async () => true });
+export const email = implementAdapter((LocalEmail satisfies typeof LocalEmail), { send: async () => true }, { provider: "test", suitability: "production" });
 export const inline = implementAdapter(
   defineAdapterContract({ name: "Inline", operations: { send: { input: object({ to: string() }), output: boolean() } } }),
   { send: async () => true },
+  { provider: "test", suitability: "production" },
 );
 `,
     });

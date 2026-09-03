@@ -1,4 +1,5 @@
 export { diffArchitectureV3, type ArchitectureDiffV3 } from "./diff-v3.js";
+export * from "./projections.js";
 export {
   diffArchitecture,
   formatArchitectureDiff,

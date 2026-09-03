@@ -1,11 +1,23 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { defineApp, entrypoint } from "typescript-on-rails";
+import {
+  createArchitectureBrief,
+  defineApp,
+  defineFeature,
+  defineRepository,
+  emailContract,
+  entrypoint,
+  InvalidInput,
+  projectedTests,
+  resolveArchitectureSelector,
+  unknownArchitectureObservations,
+} from "typescript-on-rails";
 
 import { applicationLifecyclePlugin } from "../src/application-lifecycle.js";
 import {
   ExecutionTrace,
   LifecycleRegistry,
+  assertApplicationSuitability,
   lifecyclePlugin,
   localCacheAdapter,
   localEmailAdapter,
@@ -82,9 +94,13 @@ describe("full-stack application services", () => {
 
   it("provides deterministic local adapters with replay and expiry behavior", async () => {
     const mail = localEmailAdapter();
+    assert.equal(mail.contract, emailContract);
+    assert.equal(mail.provider, "local-memory");
+    assert.equal(mail.suitability, "local-only");
     assert.equal((await mail.send({ idempotencyKey: "one", to: "dev@example.test", subject: "Hello", text: "Body" })).replayed, false);
     assert.equal((await mail.send({ idempotencyKey: "one", to: "dev@example.test", subject: "Hello", text: "Body" })).replayed, true);
     assert.equal(mail.messages.length, 1);
+    assert.doesNotMatch(JSON.stringify(mail.metadata), /dev@example|Hello|Body/);
 
     const bytes = new TextEncoder().encode("object");
     const checksum = createHash("sha256").update(bytes).digest("hex");
@@ -92,6 +108,7 @@ describe("full-stack application services", () => {
     const stored = await storage.put({ key: "one", bytes, checksum });
     assert.deepEqual(await storage.get("one", stored.version), bytes);
     await assert.rejects(() => storage.put({ key: "bad", bytes, checksum: "bad" }), /CHECKSUM/);
+    await assert.rejects(() => storage.put({ key: "bad-bytes", bytes: "bytes" as never, checksum }), InvalidInput);
 
     const payments = localPaymentsAdapter();
     assert.deepEqual(await payments.charge({ idempotencyKey: "one", customerId: "customer", amountMinor: 100, currency: "usd" }), await payments.charge({ idempotencyKey: "one", customerId: "customer", amountMinor: 100, currency: "usd" }));
@@ -109,6 +126,48 @@ describe("full-stack application services", () => {
     assert.equal(await sessions.read(token, new Date(100)), undefined);
   });
 
+  it("denies local-only adapters before a production entrypoint starts", async () => {
+    let started = false;
+    const email = localEmailAdapter();
+    const application = defineApp({
+      adapters: { email },
+      features: [defineFeature({ name: "access", adapters: [emailContract] })],
+      entrypoints: { web: entrypoint({ name: "web", process: "web", run: () => { started = true; } }) },
+    });
+    const plugin = applicationLifecyclePlugin({ load: async () => application });
+    const run = plugin.commands.dev;
+    assert.ok(run);
+    await assert.rejects(async () => {
+      await run({
+        cwd: ".",
+        environment: { NODE_ENV: "production" },
+        signal: new AbortController().signal,
+        write: () => undefined,
+      });
+    }, /ADAPTER_NOT_PRODUCTION_SUITABLE:email/);
+    assert.equal(started, false);
+  });
+
+  it("denies an expired relation exception before an entrypoint starts", async () => {
+    let started = false;
+    const repository = defineRepository({ name: "invoices", feature: "billing", relations: ["app.invoices"] });
+    const application = defineApp({
+      features: [
+        defineFeature({ name: "billing", repositories: [repository] }),
+        defineFeature({ name: "audit", relationExceptions: [{ relation: "app.invoices", reason: "expired", expires: "2000-01-01" }] }),
+      ],
+      entrypoints: { web: entrypoint({ name: "web", process: "web", run: () => { started = true; } }) },
+    });
+    assert.throws(() => assertApplicationSuitability(application, {}), /RELATION_EXCEPTION_EXPIRED:audit.app.invoices/);
+    const plugin = applicationLifecyclePlugin({ load: async () => application });
+    const run = plugin.commands.dev;
+    assert.ok(run);
+    await assert.rejects(async () => {
+      await run({ cwd: ".", environment: {}, signal: new AbortController().signal, write: () => undefined });
+    }, /RELATION_EXCEPTION_EXPIRED:audit.app.invoices/);
+    assert.equal(started, false);
+  });
+
   it("builds bounded semantic briefs and relevant test views without benefit claims", () => {
     const manifest = {
       composition: [
@@ -124,15 +183,26 @@ describe("full-stack application services", () => {
       },
     };
     const brief = semanticBrief(manifest, ["billing"]);
+    const selected = resolveArchitectureSelector(manifest, "billing");
+    assert.equal(selected.status, "resolved");
+    if (selected.status !== "resolved") throw new Error("billing selector did not resolve");
+    const canonicalBrief = createArchitectureBrief(manifest, selected);
     assert.equal(brief.contextBenefitClaim, false);
+    assert.deepEqual(brief.unresolvedSelectors, []);
+    assert.deepEqual(semanticBrief(manifest, ["billing", "missing"]).unresolvedSelectors, ["missing"]);
     assert.equal(brief.sourceBodiesIncluded, false);
     assert.equal(brief.sha256.length, 64);
+    assert.deepEqual(brief.records, canonicalBrief.records);
+    assert.deepEqual(brief.links, canonicalBrief.links);
     const unicodeA = { ...manifest, composition: [{ kind: "feature", owner: "billing", name: "billing", detail: { "é": 1, "é": 2 } }] };
     const unicodeB = { ...manifest, composition: [{ kind: "feature", owner: "billing", name: "billing", detail: { "é": 2, "é": 1 } }] };
     assert.equal(semanticBrief(unicodeA, ["billing"]).sha256, semanticBrief(unicodeB, ["billing"]).sha256);
-    assert.deepEqual(testsFor(manifest, "refund"), [{ file: "test/refund.test.ts", owner: "billing", verification: "declared-only" }]);
+    const refund = resolveArchitectureSelector(manifest, "refund");
+    assert.equal(refund.status, "resolved");
+    if (refund.status !== "resolved") throw new Error("refund selector did not resolve");
+    assert.deepEqual(testsFor(manifest, "refund"), projectedTests(manifest, refund));
     assert.deepEqual(testsFor(manifest, "refund", { exists: () => true }), [{ file: "test/refund.test.ts", owner: "billing", verification: "source-exists" }]);
-    assert.equal(unknowns(manifest).length, 1);
+    assert.deepEqual(unknowns(manifest), unknownArchitectureObservations(manifest));
   });
 
   it("redacts unsafe telemetry attributes and records request or operation traces", async () => {

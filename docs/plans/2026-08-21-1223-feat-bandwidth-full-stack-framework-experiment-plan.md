@@ -22,7 +22,40 @@ execution: code
 | Stop conditions | Stop the affected slice before changing the frozen compiler, weakening a Product Contract rule, using real data or credentials, activating a live external account, or touching unrelated local work. |
 | Execution profile | Deep, trust-boundary-first work with synthetic data, deterministic external substitutes, vertical feature slices, and independent review before benchmark evidence counts. |
 | Tail ownership | Application work closes only after the full local product passes its gates and the paired trials produce a reproducible findings report. |
-| Open blockers | None. Live-service smoke tests, production deployment, and post-freeze framework changes remain deferred and need separate approval. |
+| Open blockers | The framework source-identity condition closes only when the corrected baseline receipt binds a committed framework candidate. The frozen Bandwidth app also fails the complete Manifest v3 gate; closing that blocker requires a separately approved, committed executable-graph migration and a new U19 freeze. No new measured pair may run until both conditions close. Live-service smoke tests and production deployment remain deferred. |
+
+---
+
+## Corrected Framework Baseline Amendment (2026-09-02)
+
+This amendment changes only the framework baseline, Manifest v3 admission gate, canonical brief source, artifact identity, and complete-versus-inconclusive rule for any confirmatory execution. For confirmatory work, its public `app brief` rule supersedes the private Manifest v2 projection in KTD16 and the matching brief-construction steps and tests in U21. Those older sections remain historical descriptions of U20-U22; their receipts and results do not change. The amendment does not change the Product Contract, feature ownership, product behavior, seven stress classes, task prompts, held-out checks, or prior U20-U22 evidence.
+
+### Frozen local package set
+
+The Bandwidth handoff receipt is `experiments/framework-baseline/baseline.json` in the target repository. It identifies a local TypeScript on Rails candidate by:
+
+- base commit `1ae8f612365c729b0e60687b7160309b07fa0ab3`;
+- source-subset SHA-256 `bcd53da727cecaa32c0c202b9f28d6ac08b61323940fd6b8344fe7aa3e15d7fa` over 280 non-ignored source entries, excluding `.pi/`, Git-ignored files, and this self-referential handoff plan;
+- source lock SHA-256 `cd1b789059e236fe5f6ca55ce42f9126c8f01845120322dec7de2b59d03c5ee0`;
+- Node 22.23.2, npm 10.9.8, and TypeScript 5.9.3; and
+- six version-0.1.0 package archives under `experiments/framework-baseline/packages/`, each bound by the receipt's byte count, SHA-256, and SHA-512 integrity.
+
+A second pack on the same host, from the same build and toolchain, was byte-identical; this is same-environment determinism, not cross-platform reproducibility. The first local receipt captured an uncommitted tree. The delivery flow must bind the resulting framework commit before the Bandwidth evidence change merges. The receipt identifies a pre-stable candidate, not a release or published framework version. `sourceLock` identifies the framework producer's npm `package-lock.json`; `compatibility.json` separately binds the frozen Bandwidth consumer's pnpm lock. A measured pair still requires one committed framework source and one committed Bandwidth base.
+
+### Admission and treatment context
+
+Before any confirmatory pair:
+
+1. Both arms must install the same receipt and package archive hashes and produce the same lockfile hash. A package, archive, lock, source, prompt, tool, service, model, evaluator, or environment mismatch taints the full pair.
+2. `app check --json` must pass. Separately, `app manifest --v3 --json` must report Manifest v3 composition protocol 4, linkage protocol 4, `completeness.complete: true`, and `completeness.counts.declared > 0`. A passing legacy check or Manifest v2 remains compatibility evidence and cannot replace the Manifest v3 gate.
+3. Treatment context must come only from the public `app brief <feature> --json` command. For a task with several implementation-blind feature selectors, the harness must call the command once per selector in ordinal order and bind the exact outputs and their canonical envelope hash. It must not reconstruct a private brief from Manifest v2. Control receives no initial brief.
+4. A missing, empty, incomplete, path-dependent, or non-reproducible public brief blocks the pair. It must not be replaced with source bodies, a hand-curated registry, or inferred runtime behavior.
+
+### Current result and exit rule
+
+`experiments/framework-baseline/compatibility.json` records the first corrected-baseline probe against Bandwidth's frozen application commit `184657d58a9aecff3b030a8da3f66432a3f35ca5` and tree `d12d8c95e1f8c2d018f5ed93e679e3fdeebb5d8b`. A disposable public-API adapter migration, identified by its patch hash, makes the legacy Manifest v2 check pass, but it does not enter the frozen app. Manifest v3 contains zero executable composition records and reports 136 discovered-but-undeclared plus 74 unknown facts; those counts prove admission failure but do not size the remaining migration. The public `app brief billing --json` envelope has zero records and links, so it also fails admission.
+
+No new pair ran. The original U22 result remains inconclusive with zero valid reviewed pairs, and this follow-up adds no context-benefit or stronger maturity claim. Historical U20-U22 measurements and any future corrected-baseline measurements are separate evidence sets and are not directly comparable. A confirmatory program completes only when every stress class has at least one artifact-identical, complete-v3, public-brief, parity-accepted pair. Otherwise this program closes with the explicit inconclusive report and retains all blocked, failed, or tainted evidence.
 
 ---
 
@@ -355,7 +388,7 @@ flowchart TB
 
 ### Dependencies and Assumptions
 
-- The experiment starts from TypeScript on Rails commit `14770444d2c4a2e7a1c5e2677191ee1dbf9ec003` and Bandwidth commit `87f28b0e023b5f3a2a194b8daa024008fcf6bf7b`.
+- The original experiment started from TypeScript on Rails commit `14770444d2c4a2e7a1c5e2677191ee1dbf9ec003` and Bandwidth commit `87f28b0e023b5f3a2a194b8daa024008fcf6bf7b`. Any confirmatory execution uses the corrected framework receipt and admission rules above; the historical commits remain provenance for the completed U1-U22 run.
 - Bandwidth's product requirements and safety constraints remain behavioral authority, while its earlier technical implementation choices do not.
 - The documented TypeScript 5.9.3 versus 6.0.3 mismatch is known input; the rebuild may use the framework-supported version because the prior stack is not binding.
 - Local infrastructure and deterministic substitutes can exercise external-system contracts and failure paths without live accounts.
@@ -403,7 +436,7 @@ Product Contract preservation: clarified, no scope change. Planning-owned questi
 - KTD13. **Use PostgreSQL owner snapshots plus committed event catch-up for projections and Redis only for derived cache entries.** A rebuild captures consistent owner snapshot versions, then applies a retained compatible event stream to a gap-free tenant sequence or per-owner position vector. Old event schemas require reviewed upcasting; poison events leave the generation stale and visible. Rebuilds use inactive generations and atomic activation after completeness checks. Cursors and cache values bind tenant, sensitivity, authorization epoch, query and sort identity, projection generation, and source position. Governs R23, R30, and R37.
 - KTD14. **Validate configuration before composition and emit allowlisted telemetry.** Environment parsing produces opaque secret references, not secret values; logs, traces, metrics, and errors use the existing strict telemetry contract and one correlation chain across web, worker, scheduler, and adapters. Browser leak checks cover rendered HTML, React server payloads, prefetch responses, storage, history, back-forward cache, source maps, and built chunks. Governs R39-R41.
 - KTD15. **Treat architecture and package policy as measured product inputs with explicit evidence limits.** (session-settled: user-directed — chosen over fixing compiler friction during the build: every blocker and classification decision is experiment evidence.) Manifest claims cover root `src` only. Contract generation, support-workspace imports, types, and dependency inventory remain separate evidence domains with provenance. An app-owned import-direction gate enforces feature-to-infrastructure inversion that Manifest v2 does not prove. Record every classification and friction event when it occurs. Governs R1-R5 and R42-R45.
-- KTD16. **Build the semantic brief as an app-owned projection of Manifest v2 with implementation-blind seeds.** (session-settled: user-approved — chosen over a new compiler command or MCP surface: the experiment must test the shipped IR.) A pre-registered lexical rule maps feature names present in the common task prompt to exact semantic IDs without reading implementation files. Record mapping failures, curator inputs, time, and files as treatment cost. Use full seed records, one-hop dependency and caller summaries, canonical hashes, explicit unknowns, and no source bodies or inferred runtime guarantees. Governs R43 and R46-R48.
+- KTD16. **Historical U20-U22 rule: build the semantic brief as an app-owned projection of Manifest v2 with implementation-blind seeds.** (session-settled: user-approved — chosen over a new compiler command or MCP surface for the original run.) A pre-registered lexical rule maps feature names present in the common task prompt to exact semantic IDs without reading implementation files. Record mapping failures, curator inputs, time, and files as treatment cost. Use full seed records, one-hop dependency and caller summaries, canonical hashes, explicit unknowns, and no source bodies or inferred runtime guarantees. For any confirmatory run, the Corrected Framework Baseline Amendment supersedes this private projection with public `app brief` output. Governs historical R43 and R46-R48 evidence.
 - KTD17. **Make initial semantic context the only trial-arm difference inside an enforced sandbox.** A host-owned model broker keeps credentials outside both arms and exposes only the measured agent invocation and cancellation contract. Each arm receives its disposable worktree, task-local synthetic services, minimal environment, and equal baseline-derived resource containment. Other authority and egress stay denied. When immutable model revision and deterministic seeding are unavailable, use order-randomized repeated pairs and derive the pre-registered repetition and uncertainty method from the U1 pilot; such runs support only the reported uncertainty, not an unqualified causal claim. Governs R46-R51.
 - KTD18. **Do not add an in-product agent.** The unfamiliar agent is a developer-workflow participant only; optional extraction AI remains tool-free, non-consequential, and human-confirmed. Governs R20, R25, R43, and R46-R51.
 - KTD19. **Preserve legacy fixture meaning and namespace new experiment evidence.** Existing fixture bytes and old requirement links stay unchanged; new product, commercial, architecture, and benchmark evidence uses a separate versioned catalog with explicit cross-references. Governs R3, R7-R31, and R50.
@@ -1478,6 +1511,7 @@ flowchart TB
   6. Keep evaluator execution outside the agent-visible boundary, freeze first submissions, and produce arm-blind packets.
   7. When immutable model revision and deterministic seed are unavailable, schedule order-randomized repeated pairs using the pre-registered U1 pilot method and preserve uncertainty in the result.
   8. Capture traces from the harness and require process, worktree, and service cleanup before the pair closes.
+- **Corrected-baseline note:** The private brief construction in step 2 and its matching test scenarios describe the historical U21 harness. Any confirmatory harness must replace that path with exact public `app brief <feature> --json` envelopes and hashes as required by the Corrected Framework Baseline Amendment; it must not rewrite historical receipts.
 - **Execution note:** Prove contamination detection, metric accounting, secret denial, and evaluator symmetry before any measured pair.
 - **Patterns to follow:** Public CLI and inspector outputs, Git snapshot safety, repository secret policy, deterministic fixture catalog, and KTD17 parity contract.
 - **Test scenarios:**
@@ -1516,7 +1550,7 @@ flowchart TB
 - **Execution note:** Never rerun only the worse arm; rerun a pair only for a recorded harness or platform fault and retain both attempts.
 - **Patterns to follow:** Experiment schemas from U21, readiness evidence style, and Product Contract success criteria.
 - **Test scenarios:**
-  - Every stress class has at least one valid reviewed pair; blocked or tainted receipts remain visible incomplete outcomes.
+  - For the conclusive branch, every stress class has at least one valid reviewed pair. If admission blocks every confirmatory pair, the retained blocker receipts and explicit inconclusive report close the experiment without satisfying or claiming this conclusive condition.
   - No benchmark patch or trial commit enters the frozen application history.
   - Every result links exact base, task, brief, run, evaluator, patch, and review hashes.
   - A failed behavior, security, architecture, repository, or review gate prevents a context-benefit claim.
@@ -1534,6 +1568,8 @@ flowchart TB
 |---|---|---|
 | `pnpm runtime:check` | Every unit | Exact Node, pnpm, TypeScript, and supported runtime checks pass before work. |
 | `pnpm architecture:check` | U1-U22 | The frozen compiler produces a valid Manifest v2 for root `src` with no architecture error; it makes no claim about support-package internals. |
+| `app manifest --v3 --json` | Any confirmatory pair | Composition protocol 4, linkage protocol 4, a nonzero declared count, and complete explicit evidence pass on the exact committed app base. |
+| `app brief <feature> --json` | Any confirmatory treatment arm | The public, nonempty, complete, path-independent envelope and canonical hash reproduce for every pre-registered selector. |
 | `pnpm import-boundaries` | U1-U22 | App-owned source-role, feature-to-infrastructure, infrastructure-to-public-feature, and composition direction rules pass. |
 | `pnpm contracts:check` | U2-U22 | Support-package contract generation, imports, examples, and compatibility policy pass with separate provenance. |
 | `pnpm typecheck` | Every TypeScript unit | Strict app, support package, test, and config types pass under TypeScript 5.9.3. |
@@ -1579,14 +1615,14 @@ flowchart TB
 ### Global Completion
 
 - The Product Contract meaning and stable IDs remain unchanged; its planning-owned questions are resolved without changing scope, and every implemented behavior traces to applicable R and KTD references plus F and AE references where it realizes a declared flow or acceptance example.
-- Every U-ID satisfies its listed Verification outcome and leaves its declared tests in the repository.
+- Every U-ID either satisfies its listed Verification outcome or, for an experiment unit blocked by the corrected admission gate, retains the exact blocker evidence and closes through the explicit inconclusive branch. Declared tests remain in the repository.
 - Customer activation, AML intake through human decision, ongoing work, reporting, export, holds, retention, and offboarding complete locally with synthetic data.
 - Every relevant denial, error, replay, race, stale-state, uncertain-effect, partial-failure, browser-leak, sandbox-escape, and recovery path has direct proof.
-- The frozen TypeScript on Rails commit remains unchanged through construction and trials.
-- Manifest v2, package capability, feature-boundary, semantic-gap, and context-radius evidence is schema-valid and linked to exact source commits.
-- All seven stress classes have at least one valid reviewed pair; blocked, tainted, and failed receipts remain in the record but cannot satisfy experiment completion or support a context-benefit claim.
+- The historical TypeScript on Rails and Bandwidth commits remain unchanged in U20-U22 evidence. Any confirmatory execution starts from separately committed framework and application bases and keeps both unchanged through its pairs.
+- Manifest v2, package capability, feature-boundary, semantic-gap, and context-radius evidence is schema-valid and linked to exact historical commits. The corrected handoff remains a pre-stable candidate even after its source commit is bound; the frozen app's failed Manifest v3 and public-brief gates still prevent a measured pair.
+- The experiment closes in one of two explicit states: every stress class has at least one valid reviewed confirmatory pair, or the findings report records an inconclusive result with the exact admission blockers and zero claim. Blocked, tainted, and failed receipts remain in either record and cannot support a context-benefit claim.
 - The findings report answers all three research questions and distinguishes observations, interpretations, recommendations, rejected claims, and open gaps.
-- `make check`, independent review, and `gh signoff` pass on the clean final repository candidate.
+- `make check`, independent review, and `gh signoff` pass on any committed clean candidate used for measurement. A pre-commit evidence handoff records unavailable or environment-blocked gates honestly and does not claim signoff.
 - The final diff contains no secrets, real data, debug output, accidental asset changes, stale generated files, or changes outside the confirmed scope.
 - Temporary implementation spikes, abandoned adapters, duplicate schemas, obsolete package roots, unused dependencies, benchmark processes, services, and worktrees are removed before completion; every required valid, failed, blocked, and tainted trial receipt remains retained.
 
@@ -1599,4 +1635,4 @@ flowchart TB
 | C | U9-U15 pass and an AML review reaches an attributable human result with safe evidence, provider failure handling, correction history, and the complete AI-off path. |
 | D | U16-U18 pass and ongoing work, email, search, reporting, export, holds, retention, and offboarding preserve current authority and history. |
 | E | U19 freezes one reproducible local candidate after full gates, browser and accessibility proof, recovery exercises, and independent review. |
-| F | U20-U22 complete the construction evidence, package study, feature-boundary study, paired trials, and final evidence-linked report without changing the frozen compiler or app base. |
+| F | U20-U22 close the construction, package, feature-boundary, and trial evidence without changing their historical compiler or app base. The final report either links valid confirmatory pairs or records the explicit inconclusive branch and its admission blockers. |

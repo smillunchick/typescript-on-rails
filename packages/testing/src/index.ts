@@ -1,8 +1,12 @@
-import type { Executable, ExecutionContext } from "typescript-on-rails";
+import {
+  projectedTests,
+  resolveArchitectureSelector,
+  type ArchitectureProjectionView,
+  type Executable,
+  type ExecutionContext,
+} from "typescript-on-rails";
 
-export interface ArchitectureManifestV3Like {
-  readonly composition: readonly { readonly kind: string; readonly owner: string; readonly name: string }[];
-}
+export type ArchitectureManifestV3Like = ArchitectureProjectionView;
 import { memoryJobStore, createWorker, type JobHandler } from "@typescript-on-rails/jobs";
 import { createTestDatabase, type TestDatabase } from "@typescript-on-rails/postgres";
 
@@ -45,8 +49,10 @@ export async function browserHarness<T>(create: () => Promise<BrowserDriver>, sc
 }
 
 export function relevantTests(manifest: ArchitectureManifestV3Like, selector: string): readonly string[] {
-  const owners = new Set(manifest.composition.filter((record) => record.owner === selector || record.name === selector).map(({ owner }) => owner));
-  return Object.freeze(manifest.composition.filter((record) => record.kind === "test" && owners.has(record.owner)).map(({ name }) => name).sort());
+  const selected = resolveArchitectureSelector(manifest, selector);
+  if (selected.status === "not-found") return Object.freeze([]);
+  if (selected.status === "ambiguous") throw new TypeError(`ARCHITECTURE_SELECTOR_AMBIGUOUS:${selector}`);
+  return Object.freeze(projectedTests(manifest, selected).map(({ file }) => file));
 }
 
 export function deterministicClock(start = 0) {

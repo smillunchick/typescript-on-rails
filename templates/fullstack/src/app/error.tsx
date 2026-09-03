@@ -1,2 +1,11 @@
 "use client";
-export default function ErrorPage({ reset }: { readonly reset: () => void }) { return <main><h1>The reference app could not load</h1><button type="button" onClick={reset}>Try again</button></main>; }
+
+export default function ErrorPage({ reset }: Readonly<{ reset: () => void }>) {
+  return (
+    <main className="message-page">
+      <h1>The page could not load.</h1>
+      <p>The application is still running. Retry this request.</p>
+      <button type="button" onClick={reset}>Try again</button>
+    </main>
+  );
+}

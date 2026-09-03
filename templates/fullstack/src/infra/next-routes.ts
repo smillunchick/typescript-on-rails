@@ -1,6 +1,5 @@
 import { nextRouteFor } from "@typescript-on-rails/web/next";
 
-import { application } from "../app.js";
+import { application } from "../app-definition.js";
 
-export const createProjectNextRoute = nextRouteFor(application.graph, "/api/projects", "POST");
-export const signInNextRoute = nextRouteFor(application.graph, "/api/session", "POST");
+export const statusNextRoute = nextRouteFor(application.graph, "/api/status", "GET");

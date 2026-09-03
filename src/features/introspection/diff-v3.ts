@@ -1,5 +1,6 @@
 import type { ArchitectureManifestV3 } from "../architecture/index.js";
 import { diffArchitecture, type ArchitectureDiff } from "./diff.js";
+import { canonicalProjectionJson } from "./projections.js";
 
 export interface ArchitectureDiffV3 {
   readonly version: 3;
@@ -23,19 +24,6 @@ export interface ArchitectureDiffV3 {
   };
 }
 
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (typeof value !== "object" || value === null) return JSON.stringify(value) ?? "null";
-  return `{${Object.entries(value)
-    .sort(([left], [right]) => compareText(left, right))
-    .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
-    .join(",")}}`;
-}
-
 function compositionKey(record: ArchitectureManifestV3["composition"][number]): string {
   return `${record.kind}/${record.owner}/${record.name}`;
 }
@@ -53,8 +41,8 @@ export function diffArchitectureV3(before: ArchitectureManifestV3, after: Archit
   const afterComposition = new Set(after.composition.map(compositionKey));
   const beforeLinks = new Set(before.linkage.links.map(linkageKey));
   const afterLinks = new Set(after.linkage.links.map(linkageKey));
-  const beforeCapabilities = new Map(before.packageCapabilities.map((record) => [capabilityKey(record), canonical(record)]));
-  const afterCapabilities = new Map(after.packageCapabilities.map((record) => [capabilityKey(record), canonical(record)]));
+  const beforeCapabilities = new Map(before.packageCapabilities.map((record) => [capabilityKey(record), canonicalProjectionJson(record)]));
+  const afterCapabilities = new Map(after.packageCapabilities.map((record) => [capabilityKey(record), canonicalProjectionJson(record)]));
   return Object.freeze({
     version: 3,
     base: diffArchitecture(before.base, after.base),
