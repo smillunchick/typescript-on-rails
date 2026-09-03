@@ -11,6 +11,7 @@ import {
   adaptSchema,
   array,
   boolean,
+  bytes,
   date,
   enumOf,
   id,
@@ -20,12 +21,25 @@ import {
   object,
   optional,
   string,
+  unit,
   type Infer,
   type SchemaMetadata,
 } from "../src/index.js";
 import { normalizeSchema } from "../src/features/runtime/schema-protocol.js";
 
 describe("schemas", () => {
+  it("validates immutable bytes and unit values without exposing content in metadata", () => {
+    const source = new Uint8Array([1, 2, 3]);
+    const parsed = bytes().parse(source);
+    source[0] = 9;
+    assert.deepEqual([...parsed], [1, 2, 3]);
+    assert.throws(() => bytes().parse([1, 2, 3]), InvalidInput);
+    assert.equal(unit().parse(undefined), undefined);
+    assert.equal(unit().parse(null), undefined);
+    assert.throws(() => unit().parse(0), InvalidInput);
+    assert.doesNotMatch(JSON.stringify(bytes().metadata), /1,2,3/);
+  });
+
   it("validates and types a nested object", () => {
     const Person = object({
       id: id("Person"),

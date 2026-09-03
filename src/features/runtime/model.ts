@@ -30,7 +30,7 @@ export interface Model<TFields extends SchemaFields> {
 }
 
 export function invariant<TValue>(name: string, predicate: (value: TValue) => boolean): Invariant<TValue> {
-  return { name, test: predicate };
+  return Object.freeze({ name, test: predicate });
 }
 
 export function defineModel<const TFields extends SchemaFields>(definition: {
@@ -42,9 +42,9 @@ export function defineModel<const TFields extends SchemaFields>(definition: {
   for (const [name, field] of Object.entries(definition.fields)) {
     normalizedFields[name] = normalizeSchema(field);
   }
-  const fields = normalizedFields as TFields;
+  const fields = Object.freeze(normalizedFields) as TFields;
   const modelSchema = object(fields);
-  const invariants = definition.invariants ?? [];
+  const invariants = Object.freeze([...(definition.invariants ?? [])]);
 
   const validate = (value: unknown): ObjectOutput<TFields> => {
     const parsed = modelSchema.parse(value);
@@ -60,18 +60,18 @@ export function defineModel<const TFields extends SchemaFields>(definition: {
     return parsed;
   };
 
-  const metadata: ModelMetadata = {
+  const metadata: ModelMetadata = Object.freeze({
     kind: "model",
     name: definition.name,
-    fields: modelSchema.metadata.fields,
-    invariants: invariants.map((rule) => rule.name),
-  };
+    fields: Object.freeze({ ...modelSchema.metadata.fields }),
+    invariants: Object.freeze(invariants.map((rule) => rule.name)),
+  });
 
-  return {
+  return Object.freeze({
     name: definition.name,
     fields,
     metadata,
     parse: validate,
     validate,
-  };
+  });
 }

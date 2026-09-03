@@ -1,79 +1,260 @@
 import {
   runtimeBinding,
+  runtimeRecordId,
   type ConsumerDefinition,
   type FeatureRegistration,
   type RuntimeBinding,
 } from "typescript-on-rails";
 
-import type { JobHandler, JobStore, OutboxRecord } from "./jobs.js";
+import type {
+  DurableEnvelope,
+  JobHandler,
+  JobHandlerContext,
+  OutboxFanoutTarget,
+  OutboxRecord,
+} from "./jobs.js";
 import type { OutboxPublisher } from "./runtime.js";
+
+export interface DurableConsumerContext<TApplication> {
+  readonly application: TApplication;
+  readonly job: JobHandlerContext;
+}
+
+export type DurableAuthorityEnvelope = Omit<DurableEnvelope, "payload">;
+export interface DurableContextInput {
+  readonly envelope: DurableAuthorityEnvelope;
+  readonly attempt: number;
+}
+
+export interface DurableUpcaster {
+  readonly event: { readonly id: string };
+  readonly from: number;
+  readonly to: number;
+  upcast(value: unknown): unknown;
+}
 
 export interface ConsumerRuntime {
   readonly bindings: readonly RuntimeBinding<ConsumerDefinition<unknown, unknown>>[];
   readonly handlers: Readonly<Record<string, JobHandler>>;
-  publisher(store: JobStore): OutboxPublisher;
+  publisher(): OutboxPublisher;
 }
 
 interface RegisteredConsumer {
   readonly feature: string;
   readonly job: string;
+  readonly consumerId: string;
+  readonly eventId: string;
   readonly consumer: ConsumerDefinition<unknown, unknown>;
 }
 
-export interface ConsumerRuntimeOptions {
-  readonly context?: (registration: { readonly feature: string; readonly name: string }) => unknown;
+export interface ConsumerRuntimeOptions<TApplication = unknown> {
+  readonly context?: (input: DurableContextInput, registration: { readonly feature: string; readonly name: string; readonly consumerId: string }) => Promise<TApplication> | TApplication;
+  readonly authorize?: (input: DurableContextInput, registration: { readonly feature: string; readonly name: string; readonly consumerId: string }) => Promise<void> | void;
+  readonly upcasters?: readonly DurableUpcaster[];
 }
 
-export function createConsumerRuntime(
+function permanent(code: string, cause?: unknown): Error {
+  return Object.assign(new Error(code, cause === undefined ? undefined : { cause }), { code, permanent: true });
+}
+
+function authorityEnvelope(envelope: DurableEnvelope): DurableAuthorityEnvelope {
+  const {
+    occurrenceId,
+    eventId,
+    eventName,
+    schemaVersion,
+    occurredAt,
+    requestId,
+    correlationId,
+    tenantId,
+    actorId,
+    causationId,
+  } = envelope;
+  return Object.freeze({
+    occurrenceId,
+    eventId,
+    eventName,
+    schemaVersion,
+    occurredAt: new Date(occurredAt.getTime()),
+    ...(tenantId === undefined ? {} : { tenantId }),
+    ...(actorId === undefined ? {} : { actorId }),
+    requestId,
+    correlationId,
+    ...(causationId === undefined ? {} : { causationId }),
+  });
+}
+
+function handlerPayload(value: unknown): { readonly envelope: DurableEnvelope; readonly payload: unknown } {
+  if (typeof value !== "object" || value === null || !("envelope" in value) || !("payload" in value)) {
+    throw permanent("DURABLE_HANDLER_PAYLOAD_INVALID");
+  }
+  const raw = value.envelope;
+  if (typeof raw !== "object" || raw === null) throw permanent("DURABLE_HANDLER_PAYLOAD_INVALID");
+  const requiredText = (key: "correlationId" | "eventId" | "eventName" | "occurrenceId" | "requestId"): string => {
+    const field = Reflect.get(raw, key);
+    if (typeof field !== "string" || field.length === 0) throw permanent("DURABLE_HANDLER_PAYLOAD_INVALID");
+    return field;
+  };
+  const optionalText = (key: "actorId" | "causationId" | "tenantId"): string | undefined => {
+    const field = Reflect.get(raw, key);
+    if (field !== undefined && typeof field !== "string") throw permanent("DURABLE_HANDLER_PAYLOAD_INVALID");
+    return field;
+  };
+  const rawOccurredAt = Reflect.get(raw, "occurredAt");
+  const rawSchemaVersion = Reflect.get(raw, "schemaVersion");
+  const occurredAt = rawOccurredAt instanceof Date ? new Date(rawOccurredAt.getTime()) : new Date(String(rawOccurredAt));
+  if (Number.isNaN(occurredAt.getTime()) || !Number.isSafeInteger(rawSchemaVersion) || Number(rawSchemaVersion) < 1) {
+    throw permanent("DURABLE_HANDLER_PAYLOAD_INVALID");
+  }
+  const tenantId = optionalText("tenantId");
+  const actorId = optionalText("actorId");
+  const causationId = optionalText("causationId");
+  const envelope: DurableEnvelope = Object.freeze({
+    occurrenceId: requiredText("occurrenceId"),
+    eventId: requiredText("eventId"),
+    eventName: requiredText("eventName"),
+    schemaVersion: Number(rawSchemaVersion),
+    payload: Reflect.get(raw, "payload"),
+    occurredAt,
+    ...(tenantId === undefined ? {} : { tenantId }),
+    ...(actorId === undefined ? {} : { actorId }),
+    requestId: requiredText("requestId"),
+    correlationId: requiredText("correlationId"),
+    ...(causationId === undefined ? {} : { causationId }),
+  });
+  return Object.freeze({ envelope, payload: value.payload });
+}
+
+export function createConsumerRuntime<TApplication = unknown>(
   features: readonly FeatureRegistration[],
-  options: ConsumerRuntimeOptions = {},
+  options: ConsumerRuntimeOptions<TApplication> = {},
 ): ConsumerRuntime {
+  const eventOwners = new Map<object, string>();
+  for (const feature of features) {
+    for (const eventDefinition of feature.events) {
+      const existing = eventOwners.get(eventDefinition);
+      if (existing !== undefined && existing !== feature.name) {
+        throw new TypeError(`EVENT_OWNER_CONFLICT:${eventDefinition.name}:${existing}:${feature.name}`);
+      }
+      if (eventDefinition.owner !== undefined && eventDefinition.owner !== feature.name) {
+        throw new TypeError(`EVENT_OWNER_CONFLICT:${eventDefinition.name}:${eventDefinition.owner}:${feature.name}`);
+      }
+      eventOwners.set(eventDefinition, feature.name);
+    }
+  }
   const registered: RegisteredConsumer[] = [];
   for (const feature of features) {
     for (const consumer of feature.consumers) {
       if (!consumer.metadata.durable) continue;
-      registered.push({ feature: feature.name, job: `${feature.name}.${consumer.metadata.name}`, consumer });
+      const eventOwner = eventOwners.get(consumer.event);
+      if (eventOwner === undefined) throw new TypeError(`UNREGISTERED_CONSUMER_EVENT:${feature.name}:${consumer.metadata.name}`);
+      const eventId = runtimeRecordId("event", eventOwner, consumer.event.name);
+      const job = `${feature.name}.${consumer.metadata.name}`;
+      if (job.length > 200) throw new TypeError(`DURABLE_CONSUMER_JOB_NAME_INVALID:${job}`);
+      registered.push({
+        feature: feature.name,
+        job,
+        consumerId: runtimeRecordId("consumer", feature.name, consumer.metadata.name),
+        eventId,
+        consumer,
+      });
     }
   }
   registered.sort((left, right) => left.job.localeCompare(right.job));
-  const names = new Set<string>();
+
+  const upcasters = new Map<string, Map<number, DurableUpcaster>>();
+  for (const item of options.upcasters ?? []) {
+    if (!Number.isSafeInteger(item.from) || item.from < 1 || item.to !== item.from + 1) {
+      throw new TypeError(`UPCASTER_MUST_BE_ADJACENT:${item.event.id}:${item.from}:${item.to}`);
+    }
+    const eventUpcasters = upcasters.get(item.event.id) ?? new Map<number, DurableUpcaster>();
+    if (eventUpcasters.has(item.from)) throw new TypeError(`DUPLICATE_UPCASTER_EDGE:${item.event.id}:${item.from}`);
+    eventUpcasters.set(item.from, item);
+    upcasters.set(item.event.id, eventUpcasters);
+  }
+
+  const jobs = new Set<string>();
+  const targets = new Set<string>();
   const byEvent = new Map<string, RegisteredConsumer[]>();
   const handlers: Record<string, JobHandler> = {};
   const bindings: RuntimeBinding<ConsumerDefinition<unknown, unknown>>[] = [];
   for (const item of registered) {
-    if (names.has(item.job)) throw new TypeError(`DUPLICATE_CONSUMER_JOB:${item.job}`);
-    names.add(item.job);
-    const eventConsumers = byEvent.get(item.consumer.event.name) ?? [];
+    if (jobs.has(item.job)) throw new TypeError(`DUPLICATE_CONSUMER_JOB:${item.job}`);
+    jobs.add(item.job);
+    const targetKey = `${item.eventId}\u0000${item.consumerId}\u0000${item.consumer.event.version}`;
+    if (targets.has(targetKey)) throw new TypeError(`DUPLICATE_CONSUMER_TARGET:${item.consumerId}:${item.consumer.event.version}`);
+    targets.add(targetKey);
+    const eventConsumers = byEvent.get(item.eventId) ?? [];
     eventConsumers.push(item);
-    byEvent.set(item.consumer.event.name, eventConsumers);
-    handlers[item.job] = async (payload) => {
-      await item.consumer.handle(
-        item.consumer.event.parse(payload),
-        options.context?.({ feature: item.feature, name: item.consumer.metadata.name }),
-      );
+    byEvent.set(item.eventId, eventConsumers);
+    handlers[item.job] = async (value, job) => {
+      const durable = handlerPayload(value);
+      const input = Object.freeze({ envelope: authorityEnvelope(durable.envelope), attempt: job.attempt });
+      const registration = Object.freeze({ feature: item.feature, name: item.consumer.metadata.name, consumerId: item.consumerId });
+      await options.authorize?.(input, registration);
+      const application = await options.context?.(input, registration) as TApplication;
+      const context: DurableConsumerContext<TApplication> = Object.freeze({ application, job });
+      await item.consumer.handle(item.consumer.event.parse(durable.payload), context);
     };
-    bindings.push(runtimeBinding({
-      name: item.job,
-      protocol: "jobs.consumer/v1",
-      process: "worker",
-      target: item.consumer,
-    }));
+    bindings.push(runtimeBinding({ name: item.job, protocol: "jobs.consumer/v1", process: "worker", target: item.consumer }));
   }
+
   return Object.freeze({
     bindings: Object.freeze(bindings),
     handlers: Object.freeze(handlers),
-    publisher(store: JobStore): OutboxPublisher {
+    publisher(): OutboxPublisher {
       return Object.freeze({
-        async publish(record: OutboxRecord) {
-          const eventConsumers = byEvent.get(record.event);
-          if (eventConsumers === undefined || eventConsumers.length === 0) throw new Error(`OUTBOX_CONSUMER_NOT_REGISTERED:${record.event}`);
+        async targets(record: OutboxRecord): Promise<readonly OutboxFanoutTarget[]> {
+          const eventConsumers = byEvent.get(record.eventId);
+          if (eventConsumers === undefined || eventConsumers.length === 0) throw permanent("EVENT_NOT_REGISTERED");
+          const result: OutboxFanoutTarget[] = [];
           for (const item of eventConsumers) {
-            await store.enqueue({
-              name: item.job,
-              payload: record.payload,
-              idempotencyKey: `${record.idempotencyKey}:${item.job}`,
-            });
+            const targetVersion = item.consumer.event.version;
+            try {
+              if (record.schemaVersion > targetVersion) throw permanent("EVENT_VERSION_FROM_FUTURE");
+              let payload: unknown;
+              try {
+                payload = structuredClone(record.payload);
+              } catch (error) {
+                throw permanent("EVENT_PAYLOAD_NOT_CLONEABLE", error);
+              }
+              for (let version = record.schemaVersion; version < targetVersion; version += 1) {
+                const upcaster = upcasters.get(record.eventId)?.get(version);
+                if (upcaster === undefined) throw permanent("EVENT_UPCASTER_MISSING");
+                try {
+                  payload = upcaster.upcast(payload);
+                } catch (error) {
+                  throw permanent("EVENT_UPCAST_FAILED", error);
+                }
+              }
+              try {
+                payload = item.consumer.event.parse(payload);
+              } catch (error) {
+                throw permanent("EVENT_PAYLOAD_INVALID", error);
+              }
+              const envelope: DurableEnvelope = Object.freeze({
+                ...authorityEnvelope(record),
+                payload: record.payload,
+              });
+              result.push(Object.freeze({
+                kind: "job" as const,
+                consumerId: item.consumerId,
+                consumerVersion: targetVersion,
+                jobName: item.job,
+                payload: Object.freeze({ envelope, payload }),
+              }));
+            } catch (error) {
+              if (!(typeof error === "object" && error !== null && "permanent" in error && error.permanent === true && "code" in error && typeof error.code === "string")) throw error;
+              result.push(Object.freeze({
+                kind: "failed" as const,
+                consumerId: item.consumerId,
+                consumerVersion: targetVersion,
+                errorCode: error.code,
+                permanent: true,
+              }));
+            }
           }
+          return Object.freeze(result);
         },
       });
     },

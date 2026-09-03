@@ -3,8 +3,9 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 import { analyzeApplicationV3 } from "typescript-on-rails/architecture";
+import { assertApplicationSuitability } from "@typescript-on-rails/fullstack";
 import { createWorker, dispatchOutbox, postgresJobStore } from "@typescript-on-rails/jobs";
-import { createTestDatabase, migrateToLatest, postgresRlsHooks } from "@typescript-on-rails/postgres";
+import { createTestDatabase, migrateToLatest, postgresRlsHooks, resolveDeclaredRelationNames } from "@typescript-on-rails/postgres";
 import { nextRouteFor } from "@typescript-on-rails/web/next";
 
 import { application, createReferenceApplication } from "../src/app-definition.js";
@@ -12,7 +13,7 @@ import type { ReferenceDatabase } from "../src/infra/database.js";
 import { consumers } from "../src/infra/entrypoints.js";
 import { createHttpBindings } from "../src/infra/http.js";
 import { referenceMigrations } from "../src/infra/migrations.js";
-import { email } from "../src/infra/runtime.js";
+import { email, identity, sessions } from "../src/infra/runtime.js";
 
 const root = path.resolve(import.meta.dirname, "..");
 const testDatabaseUrl = process.env.TEST_DATABASE_URL;
@@ -44,9 +45,20 @@ describe("production-shaped full-stack reference", () => {
       "entrypoint-consumer",
       "entrypoint-route",
       "entrypoint-route",
+      "entrypoint-schedule",
+      "feature-adapter",
+      "feature-adapter",
+      "feature-adapter",
+      "repository-relation",
       "route-operation",
       "route-operation",
+      "schedule-consumer",
     ]);
+    assert.equal(application.adapters.email, email);
+    assert.equal(application.adapters.identity, identity);
+    assert.equal(application.adapters.session, sessions);
+    assert.throws(() => assertApplicationSuitability(application, { NODE_ENV: "production" }), /ADAPTER_NOT_PRODUCTION_SUITABLE/);
+    assert.deepEqual(application.graph.relations, [{ relation: "public.projects", owner: "projects", repository: "projects", exclusive: true }]);
     assert.ok(application.graph.entrypoints.worker?.bindings.every(({ target }) =>
       application.graph.consumers.some(({ definition }) => definition === target),
     ));
@@ -58,12 +70,18 @@ describe("production-shaped full-stack reference", () => {
     const createProject = manifest.composition.find(({ kind, name }) => kind === "operation" && name === "createProject");
     assert.ok(createProject);
     assert.deepEqual(
-      (createProject.detail?.calls as readonly { readonly callee: string; readonly event?: string }[]).map(({ callee, event }) => ({ callee, ...(event === undefined ? {} : { event }) })),
+      (createProject.detail?.contextObservations as readonly { readonly member: string; readonly event?: string; readonly state: string; readonly runtimeReachability: string }[]).map(({ member, event, state, runtimeReachability }) => ({ member, ...(event === undefined ? {} : { event }), state, runtimeReachability })),
       [
-        { callee: "context.projects.save" },
-        { callee: "context.outbox.appendOutbox", event: "ProjectCreated" },
+        { member: "context.projects.save", state: "direct", runtimeReachability: "unknown" },
+        { member: "context.outbox.appendOutbox", event: "ProjectCreated", state: "direct", runtimeReachability: "unknown" },
       ],
     );
+    assert.ok(manifest.composition.some(({ kind, name, owner, detail }) => kind === "adapter" && name === "email" && owner === "application" && detail?.suitability === "local-only"));
+    assert.doesNotMatch(JSON.stringify(manifest.composition.filter(({ kind }) => kind === "adapter")), /local-proof|developer@example|Body/);
+    assert.ok(manifest.composition.some(({ kind, name, detail }) => kind === "schedule" && name === "daily-project-check" && detail?.target === "checkProjects"));
+    assert.ok(manifest.composition.some(({ kind, name, detail }) => kind === "repository" && name === "projects" && detail?.sqlVerified === false));
+    assert.ok(manifest.composition.some(({ kind, name }) => kind === "relation" && name === "public.projects"));
+    assert.doesNotMatch(JSON.stringify(manifest.composition.filter(({ kind }) => kind === "repository" || kind === "relation")), /Kysely|Transaction|insertInto|selectFrom|connectionString/);
     assert.ok(manifest.composition.some(({ kind, name }) => kind === "consumer" && name === "sendProjectWelcome"));
     assert.ok(manifest.composition.some(({ kind }) => kind === "test"));
     assert.deepEqual(manifest.linkage.links, application.graph.links);
@@ -78,6 +96,7 @@ describe("production-shaped full-stack reference", () => {
     const database = await createTestDatabase<ReferenceDatabase>(testDatabaseUrl ?? "", { rls: postgresRlsHooks() });
     try {
       await migrateToLatest(database.db, referenceMigrations);
+      assert.deepEqual(await resolveDeclaredRelationNames(database.db, application.graph.relations.map(({ relation }) => relation)), [{ relation: "public.projects", resolved: true, resolvedAs: "projects" }]);
       const bindings = createHttpBindings({ database: () => database });
       const testApplication = createReferenceApplication([bindings.signIn, bindings.createProject]);
       const { sessionCookie, csrfCookie } = await signIn(testApplication.graph);
@@ -112,10 +131,10 @@ describe("production-shaped full-stack reference", () => {
 
       const store = postgresJobStore(database.db);
       const messages = email.messages.length;
-      assert.equal(await dispatchOutbox(store, consumers.publisher(store)), 1);
+      assert.equal((await dispatchOutbox(store, consumers.publisher())).published, 1);
       const worker = createWorker({ store, handlers: consumers.handlers });
       assert.equal(await worker.runOnce(new AbortController().signal), "succeeded");
-      assert.equal(await dispatchOutbox(store, consumers.publisher(store)), 0);
+      assert.equal((await dispatchOutbox(store, consumers.publisher())).published, 0);
       assert.equal(await worker.runOnce(new AbortController().signal), "idle");
       assert.equal(email.messages.length, messages + 1);
     } finally {

@@ -2,6 +2,7 @@ import type { ApplicationEntrypoint, EntrypointKind } from "typescript-on-rails"
 
 import { loadApplication, type LoadedApplication } from "./application-loader.js";
 import { lifecyclePlugin, type LifecycleContext, type LifecyclePlugin } from "./lifecycle.js";
+import { assertApplicationSuitability } from "./suitability.js";
 
 export interface ApplicationLifecycleOptions {
   readonly name?: string;
@@ -35,6 +36,7 @@ export function applicationLifecyclePlugin(options: ApplicationLifecycleOptions 
   const load = options.load ?? ((context: LifecycleContext) => loadApplication(context.cwd));
   const run = async (processes: readonly EntrypointKind[], context: LifecycleContext) => {
     const application = await load(context);
+    assertApplicationSuitability(application, context.environment, { asOf: new Date() });
     const entries = processes.flatMap((process) => {
       const entry = application.graph.entrypoints[process];
       return entry === undefined ? [] : [entry];

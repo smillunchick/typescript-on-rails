@@ -81,9 +81,9 @@ function accessMetadata<TInput, TContext extends ExecutionContext>(
   if (Number(hasPermission) + Number(hasAuthorize) + Number(isPublic) !== 1) {
     throw new InvalidInput("An operation must declare exactly one access decision");
   }
-  if (hasPermission) return { type: "permission", permission: definition.permission };
-  if (hasAuthorize) return { type: "authorize" };
-  return { type: "public" };
+  if (hasPermission) return Object.freeze({ type: "permission" as const, permission: definition.permission });
+  if (hasAuthorize) return Object.freeze({ type: "authorize" as const });
+  return Object.freeze({ type: "public" as const });
 }
 
 async function authorize<TInput, TContext extends ExecutionContext>(
@@ -107,13 +107,13 @@ export function createExecutable<
   const inputSchema = normalizeInput(definition.input);
   const outputSchema = definition.output === undefined ? undefined : normalizeSchema(definition.output);
   const access = accessMetadata(definition);
-  const metadata: ExecutableMetadata = outputSchema === undefined
+  const metadata: ExecutableMetadata = Object.freeze(outputSchema === undefined
     ? { kind, input: inputSchema.metadata, access }
-    : { kind, input: inputSchema.metadata, output: outputSchema.metadata, access };
+    : { kind, input: inputSchema.metadata, output: outputSchema.metadata, access });
 
-  return {
+  return Object.freeze({
     metadata,
-    async execute(input, context) {
+    async execute(input: unknown, context: TContext) {
       try {
         if (typeof definition.permission === "string" && !context.permissions.has(definition.permission)) {
           throw new Forbidden(`Missing permission: ${definition.permission}`);
@@ -126,7 +126,7 @@ export function createExecutable<
         throw normalizeError(error);
       }
     },
-  };
+  });
 }
 
 export function action<

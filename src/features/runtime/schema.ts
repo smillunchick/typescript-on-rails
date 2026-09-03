@@ -54,6 +54,7 @@ export type ObjectSchemaMetadata<TFields extends SchemaFields> = {
 function receivedType(value: unknown): string {
   if (value === null) return "null";
   if (Array.isArray(value)) return "array";
+  if (value instanceof Uint8Array) return "bytes";
   if (value instanceof Date) return "date";
   return typeof value;
 }
@@ -96,6 +97,50 @@ export function date(): NormalizedSchema<Date, { readonly kind: "date" }> {
       throw issue(path, "Expected a valid Date", "Date", value);
     }
     return value;
+  });
+}
+
+export function bytes(): NormalizedSchema<Uint8Array, {
+  readonly kind: "extension";
+  readonly namespace: "typescript-on-rails";
+  readonly name: "bytes";
+  readonly version: "1";
+  readonly payload: { readonly mutable: false };
+  readonly underlying: { readonly kind: "array"; readonly items: { readonly kind: "number" } };
+}> {
+  const metadata = {
+    kind: "extension",
+    namespace: "typescript-on-rails",
+    name: "bytes",
+    version: "1",
+    payload: { mutable: false },
+    underlying: { kind: "array", items: { kind: "number" } },
+  } as const;
+  return createSchema(metadata, (value, path) => {
+    if (!(value instanceof Uint8Array)) throw issue(path, "Expected bytes", "Uint8Array", value);
+    return Uint8Array.from(value);
+  });
+}
+
+export function unit(): NormalizedSchema<void, {
+  readonly kind: "extension";
+  readonly namespace: "typescript-on-rails";
+  readonly name: "unit";
+  readonly version: "1";
+  readonly payload: null;
+  readonly underlying: { readonly kind: "literal"; readonly value: null };
+}> {
+  const metadata = {
+    kind: "extension",
+    namespace: "typescript-on-rails",
+    name: "unit",
+    version: "1",
+    payload: null,
+    underlying: { kind: "literal", value: null },
+  } as const;
+  return createSchema(metadata, (value, path) => {
+    if (value !== undefined && value !== null) throw issue(path, "Expected no value", "undefined or null", value);
+    return undefined;
   });
 }
 

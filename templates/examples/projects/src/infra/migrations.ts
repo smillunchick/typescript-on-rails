@@ -1,4 +1,4 @@
-import { jobsMigration } from "@typescript-on-rails/jobs";
+import { jobsExpandMigration, jobsMigration } from "@typescript-on-rails/jobs";
 import type { MigrationDefinition } from "@typescript-on-rails/postgres";
 import { sql } from "kysely";
 
@@ -30,4 +30,5 @@ export const referenceMigrations: readonly MigrationDefinition[] = [
     up: jobsMigration.up,
     ...(jobsMigration.down === undefined ? {} : { down: jobsMigration.down }),
   },
+  { name: "003_jobs_expand", up: jobsExpandMigration.up },
 ];

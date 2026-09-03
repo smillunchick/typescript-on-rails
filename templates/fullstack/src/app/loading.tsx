@@ -1,1 +1,3 @@
-export default function Loading() { return <main aria-busy="true"><p>Loading the full-stack reference…</p></main>; }
+export default function Loading() {
+  return <main className="message-page" aria-live="polite">Loading the application…</main>;
+}

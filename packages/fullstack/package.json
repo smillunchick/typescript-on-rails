@@ -21,11 +21,12 @@
       "import": "./dist/application-loader.js",
       "default": "./dist/application-loader.js"
     },
+    "./introspection-bin": "./dist/introspection-bin.js",
     "./lifecycle-bin": "./dist/bin.js"
   },
   "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node --input-type=module -e \"import { chmodSync } from 'node:fs'; chmodSync('dist/bin.js', 0o755);\"",
+    "build": "tsc -p tsconfig.json && node --input-type=module -e \"import { chmodSync } from 'node:fs'; for (const file of ['dist/bin.js', 'dist/introspection-bin.js']) chmodSync(file, 0o755);\"",
     "typecheck": "tsc -p tsconfig.test.json",
     "test": "node --import tsx --test test/*.test.ts",
     "check": "npm run typecheck && npm test && npm run build",
@@ -34,6 +35,13 @@
   "dependencies": { "tsx": "4.20.6" },
   "peerDependencies": { "typescript-on-rails": "^0.1.0" },
   "devDependencies": { "@types/node": "^24.10.0", "typescript": "5.9.3", "typescript-on-rails": "file:../.." },
+  "typescriptOnRails": {
+    "packageFactsVersion": 1,
+    "packageFacts": [
+      { "package": "@typescript-on-rails/fullstack", "capability": "host-io", "runtime": ["server", "build"], "effects": ["filesystem", "process"], "nondeterminism": ["environment"] },
+      { "package": "tsx", "capability": "host-io", "runtime": ["server", "build"], "effects": ["filesystem", "process"], "nondeterminism": ["environment"] }
+    ]
+  },
   "engines": { "node": ">=22" },
   "license": "MIT"
 }

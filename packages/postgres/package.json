@@ -13,7 +13,16 @@
   "files": ["dist", "README.md", "LICENSE"],
   "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.test.json", "test": "node --import tsx --test test/*.test.ts", "check": "npm run typecheck && npm test && npm run build", "prepack": "npm run build" },
   "dependencies": { "kysely": "0.29.4", "pg": "8.22.0" },
-  "devDependencies": { "@types/node": "^24.10.0", "@types/pg": "8.20.0", "tsx": "^4.20.6", "typescript": "5.9.3" },
+  "peerDependencies": { "typescript-on-rails": "^0.1.0" },
+  "devDependencies": { "@types/node": "^24.10.0", "@types/pg": "8.20.0", "tsx": "^4.20.6", "typescript": "5.9.3", "typescript-on-rails": "file:../.." },
+  "typescriptOnRails": {
+    "packageFactsVersion": 1,
+    "packageFacts": [
+      { "package": "@typescript-on-rails/postgres", "capability": "host-io", "runtime": ["server"], "effects": ["database", "network"], "nondeterminism": ["external"] },
+      { "package": "kysely", "capability": "host-io", "runtime": ["server"], "effects": ["database"], "nondeterminism": ["external"] },
+      { "package": "pg", "capability": "host-io", "runtime": ["server"], "effects": ["database", "network"], "nondeterminism": ["external"] }
+    ]
+  },
   "engines": { "node": ">=22" },
   "license": "MIT"
 }

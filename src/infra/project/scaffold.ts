@@ -1,16 +1,27 @@
 import { constants } from "node:fs";
-import { access, appendFile, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import ts from "typescript";
 
+import {
+  updateAppRegistrationSource,
+  updateFeatureRegistrationSource,
+  validateFeatureRegistrationSource,
+  type FeatureArtifactCollection,
+} from "./application-shape.js";
+import { executeProjectEdit, planProjectEdit, type ProjectEditRequest } from "./project-edit.js";
+
 export interface GenerationResult {
   readonly created: readonly string[];
+  readonly updated: readonly string[];
   readonly unchanged: readonly string[];
 }
 
+export type ApplicationScaffoldContent = string | Uint8Array;
+
 export interface ApplicationScaffoldFileSystem {
   createDirectory(directory: string): Promise<void>;
-  createFile(file: string, content: string): Promise<void>;
+  createFile(file: string, content: ApplicationScaffoldContent): Promise<void>;
   removePath(target: string, recursive: boolean): Promise<void>;
 }
 
@@ -130,7 +141,7 @@ const generatedCorePackage = {
   },
 };
 
-export type ApplicationProfile = "fullstack" | "core";
+export type ApplicationProfile = "fullstack" | "core" | "projects-example";
 
 export interface ApplicationScaffoldOptions {
   readonly profile?: ApplicationProfile;
@@ -142,20 +153,38 @@ function isScaffoldFileSystem(value: ApplicationScaffoldFileSystem | Application
 }
 
 const fullStackTemplateRoot = path.resolve(import.meta.dirname, "../../../templates/fullstack");
+const projectsExampleTemplateRoot = path.resolve(import.meta.dirname, "../../../templates/examples/projects");
 
-async function fullStackTemplateFiles(directory = fullStackTemplateRoot): Promise<ReadonlyArray<readonly [string, string]>> {
+async function applicationTemplateFiles(root: string, directory = root): Promise<ReadonlyArray<readonly [string, ApplicationScaffoldContent]>> {
   const entries = await readdir(directory, { withFileTypes: true });
-  const files = (await Promise.all(entries.map(async (entry): Promise<ReadonlyArray<readonly [string, string]>> => {
+  const files = (await Promise.all(entries.map(async (entry): Promise<ReadonlyArray<readonly [string, ApplicationScaffoldContent]>> => {
     const target = path.join(directory, entry.name);
-    if (entry.isDirectory()) return fullStackTemplateFiles(target);
+    if (entry.isDirectory() && [".next", ".typescript-on-rails", "dist", "node_modules"].includes(entry.name)) return [];
+    if (entry.isDirectory()) return applicationTemplateFiles(root, target);
     if (entry.isFile() && entry.name.endsWith(".tsbuildinfo")) return [];
     if (entry.isFile()) {
-      const relative = path.relative(fullStackTemplateRoot, target);
-      return [[relative === "gitignore" ? ".gitignore" : relative, await readFile(target, "utf8")]];
+      const relative = path.relative(root, target);
+      return [[relative === "gitignore" ? ".gitignore" : relative, await readFile(target)]];
     }
     return [];
   }))).flat();
   return files.sort(([left], [right]) => left.localeCompare(right));
+}
+
+function applicationPackageName(root: string): string {
+  const value = path.basename(root).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[._]+/, "");
+  return value === "" ? "typescript-on-rails-app" : value;
+}
+
+function nameApplicationPackage(files: ReadonlyArray<readonly [string, ApplicationScaffoldContent]>, name: string): ReadonlyArray<readonly [string, ApplicationScaffoldContent]> {
+  return files.map(([relative, content]) => {
+    if (relative !== "package.json") return [relative, content] as const;
+    const source = typeof content === "string" ? content : Buffer.from(content).toString("utf8");
+    const packageJson: unknown = JSON.parse(source);
+    if (typeof packageJson !== "object" || packageJson === null || Array.isArray(packageJson)) throw new Error("Template package.json must contain an object");
+    Reflect.set(packageJson, "name", name);
+    return [relative, `${JSON.stringify(packageJson, null, 2)}\n`] as const;
+  });
 }
 
 const nodeApplicationScaffoldFileSystem: ApplicationScaffoldFileSystem = {
@@ -206,13 +235,14 @@ export async function createApplication(
     await assertOrdinaryDirectory(root);
     if ((await readdir(root)).length > 0) throw new Error(`Target directory is not empty: ${target}`);
   }
-  const files: ReadonlyArray<readonly [string, string]> = selectedProfile === "core"
+  const templateFiles: ReadonlyArray<readonly [string, ApplicationScaffoldContent]> = selectedProfile === "core"
     ? [
-        ["package.json", `${JSON.stringify(generatedCorePackage, null, 2)}\n`],
+        ["package.json", `${JSON.stringify({ ...generatedCorePackage, name: applicationPackageName(root) }, null, 2)}\n`],
         ["tsconfig.json", `${JSON.stringify(generatedTsconfig, null, 2)}\n`],
-        ["src/app.ts", `import { defineApp } from "typescript-on-rails";\n\nexport default defineApp();\n`],
+        ["src/app.ts", `import { defineApp } from "typescript-on-rails";\n\nexport default defineApp({});\n`],
       ]
-    : await fullStackTemplateFiles();
+    : await applicationTemplateFiles(selectedProfile === "projects-example" ? projectsExampleTemplateRoot : fullStackTemplateRoot);
+  const files = nameApplicationPackage(templateFiles, applicationPackageName(root));
   const directories = new Set<string>(selectedProfile === "core" ? [path.join(root, "src", "features")] : []);
   for (const [relative] of files) {
     const directory = path.dirname(path.join(root, relative));
@@ -240,7 +270,7 @@ export async function createApplication(
     }
     throw error;
   }
-  return { created: files.map(([relative]) => path.join(target, relative)), unchanged: [] };
+  return { created: files.map(([relative]) => path.join(target, relative)), updated: [], unchanged: [] };
 }
 
 function featurePaths(root: string, featureInput: string): { readonly feature: string; readonly directory: string; readonly boundary: string } {
@@ -251,71 +281,179 @@ function featurePaths(root: string, featureInput: string): { readonly feature: s
   return { feature, directory, boundary: path.join(directory, "index.ts") };
 }
 
-export async function createFeature(root: string, featureInput: string): Promise<GenerationResult> {
-  const target = featurePaths(root, featureInput);
-  if (await exists(target.directory)) await assertOrdinaryDirectory(target.directory);
-  await mkdir(target.directory, { recursive: true });
-  const created = await writeNewFile(target.boundary, "export {};\n");
-  const relative = path.relative(root, target.boundary);
-  return created ? { created: [relative], unchanged: [] } : { created: [], unchanged: [relative] };
+export interface ProjectGenerationOptions {
+  readonly validate?: (root: string) => Promise<void> | void;
 }
 
-async function appendPublicExport(boundary: string, line: string): Promise<boolean> {
-  const current = await readFile(boundary, "utf8");
-  if (current.split("\n").includes(line)) return false;
-  await appendFile(boundary, `${current.endsWith("\n") ? "" : "\n"}${line}\n`);
-  return true;
+export type GeneratedOperationAccess =
+  | { readonly public: true; readonly permission?: never }
+  | { readonly permission: string; readonly public?: never };
+
+interface GeneratedTextFile {
+  readonly path: string;
+  readonly content: string;
+  readonly collision?: boolean;
+}
+
+async function ordinaryText(file: string): Promise<string | undefined> {
+  try {
+    const metadata = await lstat(file);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error(`Refusing unsafe file: ${file}`);
+    return readFile(file, "utf8");
+  } catch (error) {
+    if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function applicationBoundary(root: string): Promise<{ readonly file: string; readonly source: string }> {
+  for (const relative of ["src/app-definition.ts", "src/app.ts"] as const) {
+    const file = path.join(root, relative);
+    const source = await ordinaryText(file);
+    if (source !== undefined) return { file, source };
+  }
+  throw new Error("Application registration does not exist; expected src/app-definition.ts or src/app.ts");
+}
+
+function featureModule(appFile: string, boundary: string): string {
+  const relative = path.relative(path.dirname(appFile), boundary).split(path.sep).join("/").replace(/\.ts$/, ".js");
+  return relative.startsWith(".") ? relative : `./${relative}`;
+}
+
+async function applyGeneratedFiles(
+  root: string,
+  files: readonly GeneratedTextFile[],
+  options: ProjectGenerationOptions,
+  primary: string,
+): Promise<GenerationResult> {
+  const requests: ProjectEditRequest[] = [];
+  const created: string[] = [];
+  const updated: string[] = [];
+  for (const file of files) {
+    const absolute = path.join(root, file.path);
+    const current = await ordinaryText(absolute);
+    if (current === file.content) continue;
+    if (file.collision === true && current !== undefined) throw new Error(`Generated file collision: ${file.path}`);
+    if (file.collision === true) requests.push({ path: file.path, content: file.content, ifAbsent: true });
+    else requests.push({ path: file.path, content: file.content });
+    if (current === undefined) created.push(file.path);
+    else updated.push(file.path);
+  }
+  if (requests.length > 0) {
+    const plan = await planProjectEdit(root, requests);
+    await executeProjectEdit(plan, options.validate === undefined ? {} : { validate: options.validate });
+  } else {
+    await options.validate?.(root);
+  }
+  return {
+    created,
+    updated,
+    unchanged: requests.some(({ path: relative }) => relative === primary) ? [] : [primary],
+  };
+}
+
+export async function createFeature(
+  root: string,
+  featureInput: string,
+  options: ProjectGenerationOptions = {},
+): Promise<GenerationResult> {
+  const target = featurePaths(root, featureInput);
+  if (await exists(target.directory)) await assertOrdinaryDirectory(target.directory);
+  const boundaryRelative = path.relative(root, target.boundary);
+  const binding = `${camelCase(target.feature, ARTIFACT_SOURCE_NAME)}Feature`;
+  assertGeneratedIdentifier(binding, target.feature);
+  const currentBoundary = await ordinaryText(target.boundary);
+  const boundary = currentBoundary ?? `import { defineFeature } from "typescript-on-rails";\n\nexport const ${binding} = defineFeature({ name: "${target.feature}" });\n`;
+  validateFeatureRegistrationSource(boundary, target.feature);
+  const app = await applicationBoundary(root);
+  const appSource = updateAppRegistrationSource(app.source, {
+    symbol: binding,
+    module: featureModule(app.file, target.boundary),
+  });
+  return applyGeneratedFiles(root, [
+    { path: boundaryRelative, content: boundary, collision: currentBoundary === undefined },
+    { path: path.relative(root, app.file), content: appSource },
+  ], options, boundaryRelative);
 }
 
 async function createFeatureArtifact(
   root: string,
   featureInput: string,
   sourceName: string,
+  collection: FeatureArtifactCollection,
   fileContent: (exportName: string) => string,
+  options: ProjectGenerationOptions,
 ): Promise<GenerationResult> {
   const target = featurePaths(root, featureInput);
-  if (!(await exists(target.boundary))) throw new Error(`Feature does not exist: ${target.feature}`);
+  const boundary = await ordinaryText(target.boundary);
+  if (boundary === undefined) throw new Error(`Feature does not exist: ${target.feature}`);
   await assertOrdinaryDirectory(target.directory);
   const exportName = sourceName;
   assertGeneratedIdentifier(exportName, sourceName);
   const fileName = `${kebabCase(sourceName)}.ts`;
-  const file = path.join(target.directory, fileName);
+  const relative = path.relative(root, path.join(target.directory, fileName));
   const expectedContent = fileContent(exportName);
-  const created = await writeNewFile(file, expectedContent);
-  if (!created) {
-    const metadata = await lstat(file);
-    const matches = metadata.isFile()
-      && !metadata.isSymbolicLink()
-      && await readFile(file, "utf8") === expectedContent;
-    if (!matches) throw new Error(`Generated file collision: ${path.relative(root, file)}`);
-  }
-  const exportLine = `export { ${exportName} } from "./${fileName.slice(0, -3)}.js";`;
-  const exported = await appendPublicExport(target.boundary, exportLine);
-  const relative = path.relative(root, file);
-  return {
-    created: [...(created ? [relative] : []), ...(exported ? [path.relative(root, target.boundary)] : [])],
-    unchanged: created ? [] : [relative],
-  };
+  const boundarySource = updateFeatureRegistrationSource(boundary, {
+    feature: target.feature,
+    symbol: exportName,
+    module: `./${fileName.slice(0, -3)}.js`,
+    collection,
+  });
+  const app = await applicationBoundary(root);
+  const binding = `${camelCase(target.feature, ARTIFACT_SOURCE_NAME)}Feature`;
+  const appSource = updateAppRegistrationSource(app.source, {
+    symbol: binding,
+    module: featureModule(app.file, target.boundary),
+  });
+  return applyGeneratedFiles(root, [
+    { path: relative, content: expectedContent, collision: true },
+    { path: path.relative(root, target.boundary), content: boundarySource },
+    { path: path.relative(root, app.file), content: appSource },
+  ], options, relative);
 }
 
-export async function createModel(root: string, nameInput: string, feature: string): Promise<GenerationResult> {
+export async function createModel(
+  root: string,
+  nameInput: string,
+  feature: string,
+  options: ProjectGenerationOptions = {},
+): Promise<GenerationResult> {
   const name = pascalCase(nameInput, ARTIFACT_SOURCE_NAME);
-  return createFeatureArtifact(root, feature, name, (exportName) => `import { defineModel, id } from "typescript-on-rails";\n\nexport const ${exportName} = defineModel({\n  name: "${exportName}",\n  fields: {\n    id: id("${exportName}"),\n  },\n});\n`);
+  return createFeatureArtifact(root, feature, name, "models", (exportName) => `import { defineModel, id } from "typescript-on-rails";\n\nexport const ${exportName} = defineModel({\n  name: "${exportName}",\n  fields: {\n    id: id("${exportName}"),\n  },\n});\n`, options);
 }
 
-function operationSource(kind: "action" | "query", exportName: string): string {
-  const authorizationComment = kind === "action"
-    ? "  // Choose public, permission, or authorize before adding protected behavior.\n"
-    : "";
-  return `import { ${kind}, object } from "typescript-on-rails";\n\nexport const ${exportName} = ${kind}({\n  input: object({}),\n${authorizationComment}  public: true,\n  run: () => undefined,\n});\n`;
+function operationSource(kind: "action" | "query", exportName: string, access: GeneratedOperationAccess): string {
+  const accessLine = access.public === true ? "  public: true," : `  permission: ${JSON.stringify(access.permission)},`;
+  return `import { ${kind}, object } from "typescript-on-rails";\n\nexport const ${exportName} = ${kind}({\n  input: object({}),\n${accessLine}\n  run: () => undefined,\n});\n`;
 }
 
-export async function createAction(root: string, nameInput: string, feature: string): Promise<GenerationResult> {
+function validateOperationAccess(access: GeneratedOperationAccess): void {
+  if (access.public === true) return;
+  if (access.permission.trim() === "" || !/^[a-z][a-z0-9.-]*$/.test(access.permission)) {
+    throw new Error(`Invalid generated permission: ${access.permission}`);
+  }
+}
+
+export async function createAction(
+  root: string,
+  nameInput: string,
+  feature: string,
+  access: GeneratedOperationAccess,
+  options: ProjectGenerationOptions = {},
+): Promise<GenerationResult> {
+  validateOperationAccess(access);
   const name = camelCase(nameInput, ARTIFACT_SOURCE_NAME);
-  return createFeatureArtifact(root, feature, name, (exportName) => operationSource("action", exportName));
+  return createFeatureArtifact(root, feature, name, "operations", (exportName) => operationSource("action", exportName, access), options);
 }
 
-export async function createQuery(root: string, nameInput: string, feature: string): Promise<GenerationResult> {
+export async function createQuery(
+  root: string,
+  nameInput: string,
+  feature: string,
+  access: GeneratedOperationAccess,
+  options: ProjectGenerationOptions = {},
+): Promise<GenerationResult> {
+  validateOperationAccess(access);
   const name = camelCase(nameInput, ARTIFACT_SOURCE_NAME);
-  return createFeatureArtifact(root, feature, name, (exportName) => operationSource("query", exportName));
+  return createFeatureArtifact(root, feature, name, "operations", (exportName) => operationSource("query", exportName, access), options);
 }

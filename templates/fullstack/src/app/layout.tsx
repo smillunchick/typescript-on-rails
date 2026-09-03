@@ -1,12 +1,17 @@
+import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 import "./globals.css";
 
-export const metadata = {
-  title: "TypeScript on Rails · Full-stack reference",
-  description: "A production-shaped local reference application",
+export const metadata: Metadata = {
+  title: "TypeScript on Rails",
+  description: "A neutral full-stack TypeScript on Rails application.",
 };
 
-export default function RootLayout({ children }: { readonly children: ReactNode }) {
-  return <html lang="en"><body>{children}</body></html>;
+export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
 }

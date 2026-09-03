@@ -64,7 +64,7 @@ export function route<
   }
 
   const access = hasPermission ? "permission" : hasAuthorize ? "authorize" : "public";
-  const metadata: RouteMetadata = {
+  const metadata: RouteMetadata = Object.freeze({
     kind: "route",
     method: definition.method,
     path: definition.path,
@@ -72,11 +72,11 @@ export function route<
     ...(outputSchema === undefined ? {} : { output: outputSchema.metadata }),
     access,
     ...(hasPermission ? { permission: definition.permission } : {}),
-  };
+  });
 
-  return {
+  return Object.freeze({
     metadata,
-    async execute(input, context) {
+    async execute(input: unknown, context: TContext) {
       try {
         if (hasPermission && !context.permissions.has(definition.permission)) {
           throw new Forbidden(`Missing permission: ${definition.permission}`);
@@ -92,7 +92,7 @@ export function route<
         throw normalizeError(error);
       }
     },
-  };
+  });
 }
 
 export function operationRoute<

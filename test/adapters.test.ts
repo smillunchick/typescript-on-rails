@@ -6,6 +6,7 @@ import {
   Unexpected,
   action,
   adaptSchema,
+  assertRuntimeSuitability,
   boolean,
   consumer,
   createEventBus,
@@ -17,14 +18,17 @@ import {
   implementAdapter,
   object,
   operationRoute,
+  parseRuntimeRecordId,
   query,
   route,
   runtimeBinding,
+  runtimeRecordId,
   string,
   entrypoint,
 } from "../src/index.js";
 
 describe("adapters and app configuration", () => {
+  const adapterOptions = { provider: "test", suitability: "production" } as const;
   const Email = defineAdapterContract({
     name: "Email",
     operations: {
@@ -38,12 +42,14 @@ describe("adapters and app configuration", () => {
   it("retains typed implementations and serializable contract metadata", async () => {
     const memoryEmail = implementAdapter(Email, {
       send: ({ to, body }) => Promise.resolve(to.length > 0 && body.length > 0),
-    });
+    }, adapterOptions);
 
     assert.equal(await memoryEmail.operations.send({ to: "a@example.com", body: "Hi" }), true);
     assert.deepEqual(memoryEmail.metadata, {
       kind: "adapter",
       name: "Email",
+      provider: "test",
+      suitability: "production",
       operations: {
         send: {
           input: Email.operations.send.input.metadata,
@@ -60,7 +66,7 @@ describe("adapters and app configuration", () => {
         invalidInputCalls += 1;
         return true;
       },
-    });
+    }, adapterOptions);
     await assert.rejects(
       // @ts-expect-error Exercise input validation for an untyped adapter caller.
       async () => validatedEmail.operations.send({ to: "a@example.com" }),
@@ -81,7 +87,7 @@ describe("adapters and app configuration", () => {
         await gate;
         return to.length > 0 && body.length > 0;
       },
-    });
+    }, adapterOptions);
     const first = concurrentEmail.operations.send({ to: "a@example.com", body: "One" });
     const second = concurrentEmail.operations.send({ to: "b@example.com", body: "Two" });
     assert.equal(concurrentCalls, 2);
@@ -90,14 +96,14 @@ describe("adapters and app configuration", () => {
 
     assert.throws(
       // @ts-expect-error Exercise the runtime guard for an untyped adapter implementation.
-      () => implementAdapter(Email, {}),
+      () => implementAdapter(Email, {}, adapterOptions),
       /Adapter Email must implement operation send/,
     );
 
     const invalidOutput = implementAdapter(Email, {
       // @ts-expect-error Exercise output validation for an untyped adapter implementation.
       send: () => "accepted",
-    });
+    }, adapterOptions);
     await assert.rejects(
       async () => invalidOutput.operations.send({ to: "a@example.com", body: "Hi" }),
       InvalidInput,
@@ -124,7 +130,7 @@ describe("adapters and app configuration", () => {
       operations: { send: { input: adaptedInput, output: adaptedOutput } },
     });
     let calls = 0;
-    const external = implementAdapter(External, { send: ({ to }) => { calls += 1; return to.length > 0; } });
+    const external = implementAdapter(External, { send: ({ to }) => { calls += 1; return to.length > 0; } }, adapterOptions);
 
     assert.equal(await external.operations.send({ to: "a@example.com" }), true);
     await assert.rejects(
@@ -145,7 +151,7 @@ describe("adapters and app configuration", () => {
       operations: { send: { input: thenableInput, output: adaptedOutput } },
     });
     let asyncCalls = 0;
-    const asynchronous = implementAdapter(Async, { send: () => { asyncCalls += 1; return true; } });
+    const asynchronous = implementAdapter(Async, { send: () => { asyncCalls += 1; return true; } }, adapterOptions);
     await assert.rejects(async () => asynchronous.operations.send("value"), Unexpected);
     assert.equal(asyncCalls, 0);
   });
@@ -196,7 +202,7 @@ describe("adapters and app configuration", () => {
       name: "SharedAdapter",
       operations: { send: { input: shared, output: boolean() } },
     });
-    const sharedAdapter = implementAdapter(SharedAdapter, { send: () => true });
+    const sharedAdapter = implementAdapter(SharedAdapter, { send: () => true }, adapterOptions);
     const context = { permissions: new Set<string>() };
     const valid: ExternalValue = { ownerId: "user_1", amount: 100, reference: "ref_1" };
     const invalid = { ownerId: 1, amount: -1, reference: null };
@@ -305,14 +311,100 @@ describe("adapters and app configuration", () => {
     );
   });
 
-  it("preserves explicit adapter configuration in an app", () => {
-    const email = implementAdapter(Email, { send: () => true });
-    const app = defineApp({ adapters: { email } });
+  it("indexes models and rejects duplicate semantic identities and test owners", () => {
+    const Project = defineModel({ name: "Project", fields: { id: string() } });
+    const firstCreated = event({ name: "ProjectCreated", payload: object({ id: string() }) });
+    const secondCreated = event({ name: "ProjectCreated", payload: object({ id: string() }) });
+    const feature = defineFeature({
+      name: "projects",
+      models: [Project],
+      events: [firstCreated],
+      tests: ["test/projects.test.ts"],
+    });
+    const app = defineApp({
+      features: [feature],
+      tests: [{ feature: "projects", files: ["test/projects.test.ts"] }],
+    });
+
+    assert.equal(app.graph.models[0]?.definition, Project);
+    assert.equal(runtimeRecordId("event", "billing/ops", "Paid 100%"), "rid1/event/billing%2Fops/Paid%20100%25");
+    assert.deepEqual(parseRuntimeRecordId("rid1/event/billing%2Fops/Paid%20100%25"), {
+      version: 1,
+      kind: "event",
+      owner: "billing/ops",
+      name: "Paid 100%",
+    });
+    assert.throws(() => parseRuntimeRecordId("rid1/event/billing%2fops/Paid%20100%25"), /INVALID_RUNTIME_RECORD_ID/);
+    assert.throws(
+      () => defineApp({ features: [defineFeature({ name: "projects", events: [firstCreated, secondCreated] })] }),
+      /DUPLICATE_RUNTIME_SEMANTIC_ID.*ProjectCreated/,
+    );
+    assert.throws(
+      () => defineApp({
+        features: [
+          defineFeature({ name: "projects", routes: [route({ method: "GET", path: "/shared", public: true, handler: () => "projects" })] }),
+          defineFeature({ name: "billing", routes: [route({ method: "GET", path: "/shared", public: true, handler: () => "billing" })] }),
+        ],
+      }),
+      /DUPLICATE_ROUTE_ENDPOINT.*GET \/shared/,
+    );
+    assert.throws(
+      () => defineApp({
+        features: [
+          defineFeature({ name: "projects", tests: ["test/shared.test.ts"] }),
+          defineFeature({ name: "billing", tests: ["./test/shared.test.ts"] }),
+        ],
+      }),
+      /DUPLICATE_TEST_OWNERSHIP.*test\/shared\.test\.ts/,
+    );
+    assert.doesNotThrow(() => defineApp({
+      features: [defineFeature({ name: "projects" }), defineFeature({ name: "billing" })],
+      tests: [{ suite: "reference", features: ["projects", "billing"], files: ["test/reference.test.ts"] }],
+    }));
+  });
+
+  it("registers exact adapter requirements, instances, links, and suitability", () => {
+    const email = implementAdapter(Email, { send: () => true }, { provider: "local-memory", suitability: "local-only" });
+    const feature = defineFeature({ name: "access", adapters: [Email] });
+    const reports = defineFeature({ name: "reports", adapters: [Email] });
+    const app = defineApp({ features: [feature, reports], adapters: { email } });
 
     assert.equal(app.adapters.email, email);
-    assert.deepEqual(app.metadata, {
-      kind: "app",
-      adapters: { email: "Email" },
-    });
+    assert.equal(app.graph.adapters[0]?.definition, email);
+    assert.equal(app.graph.adapterRequirements[0]?.definition, Email);
+    assert.deepEqual(app.graph.links.filter(({ kind }) => kind === "feature-adapter"), [
+      {
+        kind: "feature-adapter",
+        from: runtimeRecordId("adapter", "access", "Email"),
+        to: runtimeRecordId("adapter", "application", "Email"),
+      },
+      {
+        kind: "feature-adapter",
+        from: runtimeRecordId("adapter", "reports", "Email"),
+        to: runtimeRecordId("adapter", "application", "Email"),
+      },
+    ]);
+    assert.deepEqual(app.metadata, { kind: "app", graphProtocolVersion: 2, adapters: { email: "Email" } });
+    assert.throws(() => assertRuntimeSuitability(app, "production"), /ADAPTER_NOT_PRODUCTION_SUITABLE:Email/);
+    assert.doesNotThrow(() => assertRuntimeSuitability(app, "local-only"));
+    const productionEmail = implementAdapter(Email, { send: () => true }, { provider: "provider", suitability: "production" });
+    const productionApp = defineApp({ features: [feature], adapters: { email: productionEmail } });
+    assert.doesNotThrow(() => assertRuntimeSuitability(productionApp, "production"));
+    assert.equal(Object.isFrozen(Email), true);
+    assert.equal(Object.isFrozen(email), true);
+  });
+
+  it("rejects every incoherent adapter registration before graph links", () => {
+    const local = implementAdapter(Email, { send: () => true }, { provider: "local-memory", suitability: "local-only" });
+    const rebuilt = defineAdapterContract({ name: "Email", operations: Email.operations });
+    const wrong = implementAdapter(rebuilt, { send: () => true }, { provider: "other", suitability: "production" });
+    const required = defineFeature({ name: "access", adapters: [Email] });
+    assert.throws(() => defineApp({ features: [required] }), /ADAPTER_CONTRACT_NOT_REGISTERED/);
+    assert.throws(() => defineApp({ features: [required], adapters: { wrong } }), /ADAPTER_CONTRACT_IDENTITY_MISMATCH/);
+    assert.throws(() => defineApp({ features: [required], adapters: { first: local, second: local } }), /DUPLICATE_ADAPTER_CONTRACT/);
+    assert.throws(() => defineApp({ adapters: { email: local } }), /UNUSED_ADAPTER/);
+    assert.throws(() => defineFeature({ name: "duplicate", adapters: [Email, Email] }), /DUPLICATE_ADAPTER_REQUIREMENT/);
+    assert.throws(() => defineFeature({ name: "application" }), /RESERVED_FEATURE_NAME/);
+    assert.throws(() => defineApp({ features: [required], adapters: { email: { contract: Email, operations: {} } as never } }), /ADAPTER_INSTANCE_INVALID/);
   });
 });

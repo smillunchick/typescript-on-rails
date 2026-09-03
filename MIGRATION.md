@@ -4,9 +4,9 @@
 
 Manifest v3 is an additive executable-composition envelope. Manifest v2 remains byte- and semantic-compatible and stays available through `analyzeApplication`. Use `analyzeApplicationV3` when the application registers features, operations, routes, pages, permissions, events, consumers, adapters, process entry points, and test ownership with `defineApp`.
 
-Manifest v3 embeds the unchanged v2 manifest as `base`, analyzes configured support workspaces, and reports declared, discovered-but-undeclared, outside-root, and unknown behavior. Composition protocol v2 also records identity-derived runtime links and static source provenance. A manifest is complete only when routes derive from registered operations and web bindings, durable consumers bind to the registered worker, entrypoints are executable, test files exist, and no discovered or unknown behavior remains. Use `migrateManifestV2` for an explicit conservative wrapper; it marks completeness false because v2 has no executable graph or linkage evidence.
+Manifest v3 embeds the unchanged v2 manifest as `base`, analyzes configured support workspaces, and reports declared, discovered-but-undeclared, outside-root, and unknown behavior. Linkage protocol 4 records identity-derived runtime links, adapter and repository dependencies, registered schedules, and static source provenance. A manifest is complete only when routes derive from registered operations and web bindings, durable consumers bind to the registered worker, entrypoints are executable, test files exist, and no discovered or unknown behavior remains. Use `migrateManifestV2` for an explicit conservative wrapper; it marks completeness false because v2 has no executable graph or linkage evidence.
 
-Package capability v2 separates runtime location, effects, and nondeterminism and binds decisions to exact installed package versions. The manifest labels records `declared-v2` or `migrated-v1` and reports the effect model as descriptive. Automatic v1 migration resolves package metadata from each workspace and uses the active Node version for built-in modules, but its effects are conservative upper bounds rather than owner decisions. If a version cannot be resolved, Manifest v3 omits the unsafe decision and reports an unknown `package-version` observation. Programmatic `migratePackageCapabilityV1` calls must supply the exact version. Keep the legacy package map for enforced source-role rules and declare v2 records when planning needs exact effects such as `database`.
+One package capability catalog now derives both Manifest v2 enforcement and Manifest v3 description. Official package manifests declare their own and supported peer facts. The catalog resolves installed packages and npm lock entries only within the application Git root or authenticated npm-workspace root, merges legacy v1 and exact v2 application inputs, records `official`, `override`, `declared-v2`, or `migrated-v1` provenance, and rejects conflicting facts or version mismatches. Manifest v3 remains descriptive: runtime/effect facts never infer an enforcement capability, so every non-official v2 entry still needs an explicit `packageCapabilities` decision. If a version cannot be resolved, the catalog omits the unsafe v3 decision and reports an unknown observation. Unknown packages still need an explicit owner decision.
 
 `diffArchitectureV3` compares the unchanged v2 semantic diff plus executable composition, completeness counts, and package-capability decisions.
 
@@ -15,16 +15,19 @@ Full-stack CLI commands load `src/app.ts` through `@typescript-on-rails/fullstac
 ```json
 {
   "typescriptOnRails": {
+    "packageCapabilities": {
+      "vendor-audit": "external-system"
+    },
     "architectureWorkspaces": [
       { "name": "contracts", "root": "packages/contracts" }
     ],
     "packageCapabilitiesV2": [
       {
         "version": 2,
-        "package": "pg",
-        "packageVersion": "8.22.0",
+        "package": "vendor-audit",
+        "packageVersion": "1.2.3",
         "runtime": ["server"],
-        "effects": ["database", "network"],
+        "effects": ["network", "external-system"],
         "nondeterminism": ["external"]
       }
     ]
@@ -33,6 +36,32 @@ Full-stack CLI commands load `src/app.ts` through `@typescript-on-rails/fullstac
 ```
 
 Manifest v3 inherits application capability decisions into each configured support workspace. A workspace can override a package version through its own legacy package policy or through programmatic v3 options during a staged migration.
+
+## Adopt canonical agent projection v2
+
+`app brief`, `app trace`, `app tests-for`, `app unknowns`, and JSON `app check` receipts now use one canonical selector, projection version 2, and SHA-256 hash. Owner names select an owner group. Exact `rid1` IDs and `kind:owner/name` selectors choose one record. Ambiguous simple names fail with sorted candidates instead of merging owners.
+
+Trace links contain verified executable-graph linkage only. Bounded context-member and event-name syntax observations remain unverified and appear under `lexicalObservations`. Full-stack and testing compatibility APIs delegate to this projection. Generated `npm run check` uses `app check --with-tests`; lifecycle `check` type-checks and the separate test stage runs once.
+
+## Register adapter contracts and production suitability
+
+Features now list the exact adapter contracts they require: `defineFeature({ adapters: [emailContract] })`. Applications register one exact instance per contract through `defineApp({ adapters: { email } })`. Missing, same-name-different-object, duplicate, invalid, and unused registrations fail before graph links are built. Shared instances may satisfy several features.
+
+`implementAdapter` now requires `{ provider, suitability }`. Official local factories use the core contracts, retain their compatibility methods, and are marked `local-only`. The full-stack application lifecycle rejects a local-only instance before any production entrypoint runs. Manifest v3 linkage protocol 4 records `feature-adapter` links and exposes only contract name, operation names, provider, and suitability; it does not include credentials, local messages, or stored bytes. Manifest v2 remains unchanged.
+
+## Register executable repository ownership
+
+Define each repository with core `defineRepository({ name, feature, relations })` and register the exact object through `defineFeature({ repositories: [...] })`. Cross-feature public-port use registers the owner's exact repository under `repositoryAccess`. A direct relation exception belongs to the accessing feature and needs a non-empty reason plus an optional `YYYY-MM-DD` expiry. Repository, relation, public-access, and exception links then come from the executable graph.
+
+`checkRelationOwnership` remains a deprecated migration-only view. Use `migrateRelationOwnership` for deterministic repository definitions and `relationOwnershipFromGraph` when a legacy caller still needs arrays. Do not merge manual owners with registered owners. The old `defineRepository.create` field moved to an application infrastructure factory.
+
+Repository evidence is declaration-scoped. Manifest v3 states `sqlVerified: false`: it does not parse arbitrary SQL, prove a repository touches only declared relations, detect direct database access outside repositories, or prove that a logical relation prefix is a physical PostgreSQL schema. `resolveDeclaredRelationNames` only checks local-name resolution through the active `search_path`.
+
+## Register schedules and migrate lexical observations
+
+Use core `schedule({ name, feature, target, occurrences })` for feature-owned durable schedules. The target must be the exact durable consumer and event registered by the same feature. Bind that schedule object to the scheduler entrypoint with `scheduleRuntimeBinding`; Manifest v3 then records scheduler-to-schedule and schedule-to-consumer links. `runScheduler` still accepts generic string-job schedules as experimental unlinked behavior, contains failures per schedule or occurrence, accepts cancellation, bounds each schedule's occurrence batch, and returns structured counts. For a stable occurrence key, the first materialized `dueAt` wins; later wall-clock drift does not change idempotency.
+
+Application graph protocol 2, Manifest v3 composition protocol 4, and linkage protocol 4 add schedules and their links. Agent projection protocol 2 replaces operation `calls`/`callsResolved` with `contextObservations` and `contextObservationResolution`. These are bounded lexical facts with explicit direct, alias-unresolved, computed-unresolved, nested-scope, source-resolution, and unknown runtime-reachability states. They never become verified graph links.
 
 ## Migrate to architecture manifest v2
 
@@ -233,7 +262,11 @@ Use names such as:
 }
 ```
 
-When `@typescript-on-rails/fullstack` is installed, `app dev`, `app build`, `app test`, `app check`, `app migrate`, `app worker`, `app scheduler`, and `app seed` use its lifecycle registry. `app dev` runs registered web, worker, and scheduler entrypoints concurrently. Core-only applications keep the legacy app-owned `dev:app`, `build:app`, and `test:app` delegation path. New scaffolds are full-stack by default; use `app new <directory> --core` for the old minimal shape.
+When `@typescript-on-rails/fullstack` is installed, `app dev`, `app build`, `app test`, and `app check` use its lifecycle registry; applications may add migrate, worker, scheduler, and seed commands when those runtimes exist. Core-only applications keep the legacy app-owned `dev:app`, `build:app`, and `test:app` delegation path. New scaffolds are neutral full-stack web applications by default. Use `app new <directory> --example projects` for the guided PostgreSQL and jobs example, or `app new <directory> --core` for the old minimal shape.
+
+Generated actions and queries now require either `--public` or `--permission <permission>`. Feature, model, action, and query generation updates the canonical `defineFeature` and `defineApp` registrations. A customized registration shape receives a non-writing error and must be updated manually. If a handled failure cannot restore every journaled file, run `app recover` before another generator command.
+
+Manifest v2 semantic IDs remain `sid1` and byte-compatible. Manifest v3 composition protocol 3 uses `rid1` runtime-record IDs and linkage protocol 2. Application construction now rejects distinct definitions with the same owner-qualified runtime identity, duplicate HTTP method and path pairs, duplicate entrypoint names across processes, and conflicting test-file owners. Feature tests belong in `defineFeature.tests`; named cross-feature suites use `defineApp({ tests: [{ suite, features, files }] })`.
 
 ## Verify the migration
 
@@ -256,3 +289,22 @@ Then inspect representative manifest records and CLI JSON. Confirm that:
 - package policy and package uses are present and correct;
 - architecture diff ignores source-only movement;
 - the package includes this migration guide.
+
+## Expand the experimental jobs schema
+
+Apply `jobsExpandMigration` after the existing `jobsMigration`. Do not edit or rerun the old migration.
+
+The new writer stores both the legacy event name and the exact `rid1/event/<feature>/<event>` ID. It also stores the schema version, occurrence time, request and correlation IDs, optional causation ID, and optional tenant and actor IDs. Do not add credentials, permission results, or free-form context to the envelope.
+
+Before `jobsExpandMigration`, the database is in the conceptual `Legacy` stage and has no migration-state row. Applying the expand migration creates the `Expanded` row. Move that stored state only through:
+
+1. `Expanded`
+2. `Dual-write`
+3. `Reconciling`
+4. `Cutover`
+
+Reconciliation uses the current application graph. It resolves a legacy name only when that name has one exact event ID. It quarantines unknown and ambiguous names without changing their payloads. The first reconciliation step pins the canonical graph hash; a changed graph must not continue the same reconciliation. Cutover refuses any legacy row without classification evidence.
+
+Before cutover, start exact-capable workers and call `assertOutboxCapability("exact")`. A rollback restriction blocks name-only workers after cutover or as soon as two exact IDs use one legacy display name. Replay needs a bounded request ID, approver, reason, and valid request time. It keeps the original row and history, carries successful target receipts forward, and retries failed targets under a new generation. History stays append-only; read it in bounded pages with `outboxHistory(id, { limit, beforeSequence })`. The expand migration has no destructive `down` step.
+
+The jobs APIs in this release are experimental. Outbox delivery and external effects remain at least once. Use business-write deduplication, provider idempotency, and fenced effect receipts where needed.

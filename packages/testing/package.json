@@ -15,6 +15,12 @@
   "dependencies": { "@typescript-on-rails/jobs": "0.1.0", "@typescript-on-rails/postgres": "0.1.0" },
   "peerDependencies": { "typescript-on-rails": "0.1.0" },
   "devDependencies": { "@types/node": "^24.10.0", "tsx": "^4.20.6", "typescript": "5.9.3", "typescript-on-rails": "file:../.." },
+  "typescriptOnRails": {
+    "packageFactsVersion": 1,
+    "packageFacts": [
+      { "package": "@typescript-on-rails/testing", "capability": "host-io", "runtime": ["server"], "effects": ["database"], "nondeterminism": ["random"] }
+    ]
+  },
   "engines": { "node": ">=22" },
   "license": "MIT"
 }

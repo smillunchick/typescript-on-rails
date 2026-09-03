@@ -6,6 +6,7 @@ export interface RequestTransactionContext {
   readonly tenantId: string;
   readonly actorId: string;
   readonly requestId: string;
+  readonly correlationId?: string;
 }
 
 export interface RequestTransactionScope<DB> {
@@ -34,7 +35,7 @@ export function withPostgresRequestUnitOfWork<DB, T>(
     return operation(Object.freeze({
       ...context,
       transaction,
-      outbox: postgresOutboxWriter(transaction),
+      outbox: postgresOutboxWriter(transaction, context),
       jobs,
     }));
   });

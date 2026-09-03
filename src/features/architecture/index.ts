@@ -1,6 +1,9 @@
 export { analyzeApplication } from "./analyze.js";
 export {
   analyzeApplicationV3,
+  isLexicalContextObservation,
+  MANIFEST_V3_COMPOSITION_PROTOCOL_VERSION,
+  MANIFEST_V3_LINKAGE_PROTOCOL_VERSION,
   migrateManifestV2,
   migratePackageCapabilityV1,
   resolvePackageCapabilitiesV2,
@@ -8,6 +11,7 @@ export {
   type ArchitectureManifestV3,
   type CompletenessObservation,
   type ComposedSemanticRecord,
+  type LexicalContextObservation,
   type CompositionSource,
   type PackageCapabilityV2,
   type PackageCapabilityV2Input,
@@ -18,6 +22,12 @@ export {
   type WorkspaceArchitectureManifest,
 } from "./manifest-v3.js";
 export { formatArchitectureDiagnostic } from "./diagnostics.js";
+export {
+  APPLICATION_INTROSPECTION_PROTOCOL,
+  type ApplicationIntrospectionFailure,
+  type ApplicationIntrospectionResult,
+  type ApplicationIntrospectionSuccess,
+} from "./introspection-protocol.js";
 export {
   decodeSemanticId,
   encodeSemanticId,

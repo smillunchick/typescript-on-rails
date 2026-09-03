@@ -26,6 +26,17 @@
     "react-dom": { "optional": true }
   },
   "devDependencies": { "@types/node": "^24.10.0", "@types/react": "^19.2.0", "@types/react-dom": "^19.2.0", "react": "19.2.8", "react-dom": "19.2.8", "tsx": "^4.20.6", "typescript": "5.9.3", "typescript-on-rails": "file:../.." },
+  "typescriptOnRails": {
+    "packageFactsVersion": 1,
+    "packageFacts": [
+      { "package": "@typescript-on-rails/web", "capability": "host-io", "runtime": ["universal", "server"], "effects": ["none"], "nondeterminism": ["none"] },
+      { "package": "next", "capability": "ui", "runtime": ["browser", "server", "build"], "effects": ["filesystem", "network", "process"], "nondeterminism": ["environment"] },
+      { "package": "next/headers", "capability": "host-io", "runtime": ["server"], "effects": ["none"], "nondeterminism": ["external"] },
+      { "package": "react", "capability": "ui", "runtime": ["browser", "server"], "effects": ["none"], "nondeterminism": ["none"] },
+      { "package": "react/jsx-runtime", "capability": "ui", "runtime": ["browser", "server"], "effects": ["none"], "nondeterminism": ["none"] },
+      { "package": "react-dom", "capability": "ui", "runtime": ["browser", "server"], "effects": ["none"], "nondeterminism": ["none"] }
+    ]
+  },
   "engines": { "node": ">=22" },
   "license": "MIT"
 }

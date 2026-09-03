@@ -66,7 +66,7 @@ export const getInvoice = query({ input: object({ id: string() }), permission: "
       "src/infra/email.ts": `
 import { boolean, defineAdapterContract, implementAdapter, object, string } from "typescript-on-rails";
 export const Email = defineAdapterContract({ name: "Email", operations: { send: { input: object({ to: string() }), output: boolean() } } });
-export const email = implementAdapter(Email, { send: () => true });
+export const email = implementAdapter(Email, { send: () => true }, { provider: "test", suitability: "production" });
 `,
     };
     const first = await analyze(files);
@@ -306,8 +306,18 @@ export { future };
     assert.equal(manifest.exceptions.filter((entry) => entry.valid).length, 1);
   });
 
-  it("does not classify the installed framework's declarations as vendor types", async () => {
+  it("accepts installed framework types while tracing their nested vendor types", async () => {
     const fixture = await createAppFixture({
+      "package.json": `${JSON.stringify({
+        private: true,
+        type: "module",
+        dependencies: {
+          "@typescript-on-rails/jobs": "0.1.0",
+          "typescript-on-rails": "0.1.0",
+          "vendor-sdk": "1.0.0",
+        },
+        typescriptOnRails: { packageCapabilities: {} },
+      }, null, 2)}\n`,
       "node_modules/typescript-on-rails/package.json": `{"name":"typescript-on-rails","type":"module","types":"index.d.ts"}`,
       "node_modules/typescript-on-rails/index.d.ts": `
 export interface FrameworkOperation {
@@ -321,9 +331,31 @@ export function action(definition: {
   readonly run: () => unknown;
 }): FrameworkOperation;
 `,
+      "node_modules/@typescript-on-rails/jobs/package.json": `{"name":"@typescript-on-rails/jobs","type":"module","types":"index.d.ts"}`,
+      "node_modules/@typescript-on-rails/jobs/index.d.ts": `
+import type { NestedVendorResult } from "nested-vendor";
+export interface FrameworkConsumer {
+  readonly kind: "consumer";
+  run(): Promise<void>;
+}
+export interface LeakyFrameworkConsumer {
+  readonly result: NestedVendorResult;
+}
+export function consumer(): FrameworkConsumer;
+export function leakyConsumer(): LeakyFrameworkConsumer;
+`,
+      "node_modules/@typescript-on-rails/jobs/node_modules/nested-vendor/package.json": `{"name":"nested-vendor","type":"module","types":"index.d.ts"}`,
+      "node_modules/@typescript-on-rails/jobs/node_modules/nested-vendor/index.d.ts": `export interface NestedVendorResult { readonly token: string }`,
+      "node_modules/vendor-sdk/package.json": `{"name":"vendor-sdk","type":"module","types":"index.d.ts"}`,
+      "node_modules/vendor-sdk/index.d.ts": `export interface VendorResult { readonly token: string }`,
       "src/features/health/index.ts": `
 import { action, object } from "typescript-on-rails";
+import { consumer, leakyConsumer } from "@typescript-on-rails/jobs";
+import type { VendorResult } from "vendor-sdk";
 export const health = action({ input: object({}), public: true, run: () => "ok" });
+export const healthConsumer = consumer();
+export const nestedVendorLeak = leakyConsumer();
+export const directVendorLeak: VendorResult = { token: "fixture" };
 `,
     });
     fixtures.push(fixture);
@@ -339,10 +371,26 @@ export const health = action({ input: object({}), public: true, run: () => "ok" 
     }, null, 2)}\n`);
 
     const manifest = analyzeApplication(fixture.root);
+    const health = manifest.features.find((feature) => feature.name === "health");
 
-    assert.ok(!manifest.diagnostics.some((entry) => (
-      entry.rule === "vendor-type-leak" && entry.target === "health"
-    )));
+    assert.ok(!manifest.diagnostics.some((entry) => entry.rule === "typescript"));
+    assert.deepEqual(health?.exports.map(({ name }) => name), [
+      "directVendorLeak",
+      "health",
+      "healthConsumer",
+      "nestedVendorLeak",
+    ]);
+    for (const target of ["health", "healthConsumer"]) {
+      assert.ok(!manifest.diagnostics.some((entry) => (
+        (entry.rule === "public-api-type" || entry.rule === "vendor-type-leak")
+        && entry.target === target
+      )));
+    }
+    for (const target of ["directVendorLeak", "nestedVendorLeak"]) {
+      assert.ok(manifest.diagnostics.some((entry) => (
+        entry.rule === "vendor-type-leak" && entry.target === target
+      )));
+    }
   });
 
   it("traces public vendor types without an arbitrary depth limit", async () => {

@@ -2,8 +2,10 @@ import {
   Unauthorized,
   action,
   defineFeature,
+  identityContract,
   object,
   operationRoute,
+  sessionContract,
   string,
   type ExecutionContext,
 } from "typescript-on-rails";
@@ -37,5 +39,5 @@ export const accessFeature = defineFeature<AccessContext>({
   operations: { authenticateSession },
   routes: [sessionRoute],
   permissions: ["session.create"],
-  tests: ["test/reference.test.ts"],
+  adapters: [identityContract, sessionContract],
 });

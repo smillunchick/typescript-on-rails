@@ -1,13 +1,13 @@
 # Agent-Native TypeScript Application Architecture Vision
 ## High-Level Architectural Plan
 
-## Current shipped scope
+## Current implemented scope
 
-The shipped product is an agent-native full-stack TypeScript framework with a small architecture compiler at its core and modular official runtimes. The core provides architecture analysis, strict TypeScript conventions, application structure, generators, Manifest v3, and introspection without importing Next, React, PostgreSQL, or Kysely.
+The pre-stable 0.1 candidate is an agent-native full-stack TypeScript framework with a small architecture compiler at its core and modular official runtimes. The core provides architecture analysis, strict TypeScript conventions, application structure, generators, Manifest v3, and introspection without importing Next, React, PostgreSQL, or Kysely.
 
-Official packages provide the supported Next and React web path, PostgreSQL and Kysely persistence, PostgreSQL-backed durable work, application lifecycle and local adapters, and full-stack test harnesses. Applications install only the modules they use. Manifest v2 remains compatible while Manifest v3 adds executable composition, completeness, workspace, and package-effect facts.
+Official packages provide the maintained Next and React web path, PostgreSQL and Kysely persistence, experimental PostgreSQL-backed durable work, application lifecycle with local-only adapters, and full-stack test harnesses. Applications install only the modules they use. Manifest v2 remains compatible while Manifest v3 adds executable composition, completeness, workspace, and package-effect facts.
 
-This document records both the implemented architecture and the principles that govern later improvements. Sections that say “should” remain design doctrine, not a claim that every possible adapter or deployment target exists.
+This document records both the implemented architecture and the principles that govern later improvements. Sections that say “should” remain design doctrine, not a claim that every possible adapter or deployment target exists. Local reference and database evidence does not prove production identity, provider, cloud, operating, recovery, security-review, deployment, or launch readiness. The corrected-baseline Bandwidth handoff was inconclusive and supports no stronger maturity or context-benefit claim.
 
 ## 1. Premise
 
@@ -794,8 +794,8 @@ app check
 app test
 
 app create feature billing
-app create model Invoice
-app create action approveInvoice
+app create model Invoice --feature billing
+app create action approveInvoice --feature billing --permission invoice.approve
 
 app explain billing
 app graph

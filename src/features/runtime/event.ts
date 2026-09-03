@@ -1,10 +1,13 @@
 import type { Schema, SchemaMetadata } from "./schema.js";
 import { normalizeSchema } from "./schema-protocol.js";
+import { runtimeRecordId } from "./runtime-id.js";
 
 type MaybePromise<TValue> = TValue | Promise<TValue>;
 type EventHandler = (payload: unknown) => Promise<void>;
 
 export interface EventDefinition<TPayload> {
+  readonly owner?: string;
+  readonly id?: string;
   readonly name: string;
   readonly version: number;
   readonly payload: Schema<TPayload>;
@@ -16,14 +19,32 @@ export interface EventDefinition<TPayload> {
   };
 }
 
-export function event<TPayload>(definition: {
+export interface OwnedEventDefinition<TPayload> extends EventDefinition<TPayload> {
+  readonly owner: string;
+  readonly id: string;
+}
+
+interface EventInput<TPayload> {
   readonly name: string;
+  readonly version?: number;
   readonly payload: Schema<TPayload>;
-}): EventDefinition<TPayload> {
+}
+
+export function event<TPayload>(definition: EventInput<TPayload> & { readonly owner: string }): OwnedEventDefinition<TPayload>;
+export function event<TPayload>(definition: EventInput<TPayload>): EventDefinition<TPayload>;
+export function event<TPayload>(definition: EventInput<TPayload> & { readonly owner?: string }): EventDefinition<TPayload> {
+  const version = definition.version ?? 1;
+  if (!Number.isSafeInteger(version) || version < 1) throw new TypeError("EVENT_VERSION_MUST_BE_A_POSITIVE_INTEGER");
+  if (definition.owner !== undefined && !/^[a-z][a-z0-9-]*$/.test(definition.owner)) {
+    throw new TypeError("EVENT_OWNER_MUST_BE_KEBAB_CASE");
+  }
   const payload = normalizeSchema(definition.payload);
   return Object.freeze({
+    ...(definition.owner === undefined
+      ? {}
+      : { owner: definition.owner, id: runtimeRecordId("event", definition.owner, definition.name) }),
     name: definition.name,
-    version: 1,
+    version,
     payload,
     parse: (value: unknown) => payload.parse(value),
     metadata: Object.freeze({ kind: "event" as const, name: definition.name, payload: payload.metadata }),

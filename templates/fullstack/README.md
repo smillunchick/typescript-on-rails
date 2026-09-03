@@ -1,14 +1,13 @@
-# Full-stack TypeScript on Rails application
+# TypeScript on Rails application
 
-## Start locally
+This is a neutral full-stack starting point. It includes one registered status feature, one operation-backed HTTP route, one server-rendered page, and one small client interaction.
 
-1. Copy `.env.example` to `.env` and set `DATABASE_URL`.
-2. Run `npm install`.
-3. Run `npm run migrate`.
-4. Run `npm run dev`.
+```bash
+npm install
+npm run check
+npm run dev
+```
 
-The local sign-in is `demo` with proof `local-proof`.
+Open `http://localhost:3420` or request `GET /api/status`.
 
-## Before production
-
-Replace the `localIdentityAdapter`, `localSessionAdapter`, and `localEmailAdapter` values in `src/infra/runtime.ts` with durable provider adapters. Local identity rejects production authentication. Local sessions and email live only in one process and reset on restart.
+Add product features with `app create feature`. Add PostgreSQL, durable jobs, identity, and external adapters only when the application needs them. The generated app performs no production network or database work by default.
