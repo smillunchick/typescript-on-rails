@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { createTestDatabase, migrateToLatest } from "@typescript-on-rails/postgres";
+import { createTestDatabase } from "@typescript-on-rails/postgres";
 import { sql } from "kysely";
 import { consumer, defineFeature, event, object, runtimeRecordId, schedule, string } from "typescript-on-rails";
 
@@ -41,10 +41,12 @@ describe("PostgreSQL durable work", () => {
           select current_user, (select rolsuper from pg_roles where rolname = current_user) as superuser
         `.execute(database.db);
         assert.equal(role.rows[0]?.superuser, false);
-        await migrateToLatest(database.db, [
-          { name: "001_jobs", up: jobsMigration.up },
-          { name: "002_jobs_expand", up: jobsExpandMigration.up },
-        ]);
+        // Migration-runner isolation belongs to postgres.test.ts; these fixtures
+        // apply the real migrations without introspecting concurrently dropped schemas.
+        await database.db.transaction().execute(async (transaction) => {
+          await jobsMigration.up(transaction);
+          await jobsExpandMigration.up(transaction);
+        });
         const store = postgresJobStore(database.db);
         const Scheduled = event({ owner: "postgres-schedule", name: "Scheduled", payload: object({ id: string() }) });
         const scheduledConsumer = consumer({ name: "target", event: Scheduled, durable: true, handle: () => undefined });
@@ -240,7 +242,7 @@ describe("PostgreSQL durable work", () => {
     async () => {
       const database = await createTestDatabase<JobDatabase>(connectionString ?? "");
       try {
-        await migrateToLatest(database.db, [{ name: "001_jobs", up: jobsMigration.up }]);
+        await database.db.transaction().execute(jobsMigration.up);
         for (const [id, eventName] of [["legacy_known", "Known"], ["legacy_unknown", "Unknown"], ["legacy_ambiguous", "Ambiguous"]] as const) {
           await sql`
             insert into tor_outbox
@@ -248,10 +250,7 @@ describe("PostgreSQL durable work", () => {
             values (${id}, ${eventName}, 1, ${JSON.stringify({ original: id })}::jsonb, ${`key:${id}`}, ${"0".repeat(64)}, null, now(), null, null)
           `.execute(database.db);
         }
-        await migrateToLatest(database.db, [
-          { name: "001_jobs", up: jobsMigration.up },
-          { name: "002_jobs_expand", up: jobsExpandMigration.up },
-        ]);
+        await database.db.transaction().execute(jobsExpandMigration.up);
         const store = postgresJobStore(database.db);
         assert.equal((await store.readMigrationState()).state, "Expanded");
         assert.equal(await store.transitionMigrationState("Expanded", "Dual-write"), true);
@@ -381,10 +380,10 @@ describe("PostgreSQL durable work", () => {
     async () => {
       const database = await createTestDatabase<JobDatabase>(connectionString ?? "");
       try {
-        await migrateToLatest(database.db, [
-          { name: "001_jobs", up: jobsMigration.up },
-          { name: "002_jobs_expand", up: jobsExpandMigration.up },
-        ]);
+        await database.db.transaction().execute(async (transaction) => {
+          await jobsMigration.up(transaction);
+          await jobsExpandMigration.up(transaction);
+        });
         const First = testEvent({ owner: "deadlock", name: "First", parse: (value: unknown) => value });
         const Second = testEvent({ owner: "deadlock", name: "Second", parse: (value: unknown) => value });
         let firstAppends = 0;
@@ -422,10 +421,10 @@ describe("PostgreSQL durable work", () => {
       }
       const database = await createTestDatabase<RequestDatabase>(connectionString ?? "");
       try {
-        await migrateToLatest(database.db, [
-          { name: "001_jobs", up: jobsMigration.up },
-          { name: "002_jobs_expand", up: jobsExpandMigration.up },
-        ]);
+        await database.db.transaction().execute(async (transaction) => {
+          await jobsMigration.up(transaction);
+          await jobsExpandMigration.up(transaction);
+        });
         await database.db.schema
           .createTable("projects")
           .addColumn("id", "varchar(80)", (column) => column.primaryKey())

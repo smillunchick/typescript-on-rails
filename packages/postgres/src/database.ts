@@ -98,10 +98,17 @@ class OrderedMigrationProvider implements MigrationProvider {
 }
 
 export async function migrateToLatest<DB>(db: Kysely<DB>, migrations: readonly MigrationDefinition[]): Promise<readonly string[]> {
-  const migrator = new Migrator({ db, provider: new OrderedMigrationProvider([...migrations].sort((a, b) => a.name.localeCompare(b.name))) });
-  const result = await migrator.migrateToLatest();
-  if (result.error !== undefined) throw result.error;
-  return Object.freeze((result.results ?? []).map(({ migrationName, status }: { readonly migrationName: string; readonly status: string }) => `${migrationName}:${status}`));
+  return db.connection().execute(async (connection) => {
+    const { rows } = await sql<{ schema: string | null }>`select current_schema() as schema`.execute(connection);
+    const schema = rows[0]?.schema;
+    if (typeof schema !== "string" || schema.length === 0) throw new Error("MIGRATION_SCHEMA_MISSING");
+    // Bookkeeping must not match identically named tables in another schema.
+    // Keep the connection's search path unchanged for application migrations.
+    const migrator = new Migrator({ db: connection, migrationTableSchema: schema, provider: new OrderedMigrationProvider([...migrations].sort((a, b) => a.name.localeCompare(b.name))) });
+    const result = await migrator.migrateToLatest();
+    if (result.error !== undefined) throw result.error;
+    return Object.freeze((result.results ?? []).map(({ migrationName, status }: { readonly migrationName: string; readonly status: string }) => `${migrationName}:${status}`));
+  });
 }
 
 export interface Seed<DB> { readonly name: string; run(db: Kysely<DB>): Promise<void> }
