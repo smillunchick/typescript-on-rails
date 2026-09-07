@@ -171,7 +171,9 @@ function registeredOccurrence(
     identityPayload: { payloadPresent: payload !== undefined, payload: payload ?? null },
     job: Object.freeze({
       name: jobName,
+      consumerId: runtimeRecordId("consumer", scheduled.feature, scheduled.target.metadata.name),
       payload: Object.freeze({
+        payloadVersion: scheduled.target.event.version,
         envelope: Object.freeze({
           occurrenceId: requestId,
           eventId,

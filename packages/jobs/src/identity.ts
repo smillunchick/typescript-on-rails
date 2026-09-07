@@ -43,6 +43,11 @@ function freezeJson(value: JsonValue): JsonValue {
   return value;
 }
 
+export function samePersistedJson(left: unknown, right: unknown): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return canonical(persistedJson(left)) === canonical(persistedJson(right));
+}
+
 export function immutablePersistedJson(value: unknown): unknown {
   return freezeJson(persistedJson(value));
 }
