@@ -42,7 +42,7 @@ describe("full-stack CLI", () => {
 
   it("returns compact source-linked briefs, traces, unknowns, and verified tests", async () => {
     const fixture = await createAppFixture({
-      "src/app.ts": 'import { defineApp, defineFeature } from "typescript-on-rails"; import { endpoint } from "./features/billing/index.js"; import { healthEndpoint } from "./features/health/index.js"; export const application = defineApp({ features: [defineFeature({ name: "billing", routes: [endpoint] }), defineFeature({ name: "health", routes: [healthEndpoint] })] });\n',
+      "src/app.ts": 'import { defineApp, defineFeature } from "typescript-on-rails"; import { endpoint } from "./features/billing/index.js"; import { healthEndpoint } from "./features/health/index.js"; import { web } from "./app-definition.js"; export const application = defineApp({ features: [defineFeature({ name: "billing", routes: [endpoint] }), defineFeature({ name: "health", routes: [healthEndpoint] })], entrypoints: { web } });\n',
       "src/features/billing/index.ts": [
         'import { action, object, operationRoute } from "typescript-on-rails";',
         "export const total = action({ input: object({}), public: true, run: () => 1 });",

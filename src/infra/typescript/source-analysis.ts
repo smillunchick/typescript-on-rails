@@ -123,6 +123,31 @@ function applicationConfig(root: string, program: ts.Program, factories: Readonl
   return null;
 }
 
+// Entrypoint maps may use a single-return factory, as in the reference app.
+// Resolve its returned declarations without evaluating arguments or branches.
+function entrypointMap(program: ts.Program, expression: ts.Expression | undefined): ts.ObjectLiteralExpression | undefined {
+  const checker = program.getTypeChecker();
+  let value = constExpression(checker, expression);
+  const visited = new Set<ts.Symbol>();
+  while (value !== undefined && ts.isCallExpression(value)) {
+    const symbol = expressionSymbol(checker, value.expression);
+    if (symbol === undefined || visited.has(symbol)) return undefined;
+    visited.add(symbol);
+    const callee = value.expression;
+    if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "Object" && callee.name.text === "freeze"
+      && checker.getSymbolAtLocation(callee.expression)?.declarations?.every((declaration) => program.isSourceFileDefaultLibrary(declaration.getSourceFile()))
+      && symbol.declarations?.every((declaration) => program.isSourceFileDefaultLibrary(declaration.getSourceFile())) && value.arguments.length === 1) {
+      value = constExpression(checker, value.arguments[0]);
+      continue;
+    }
+    const declaration = symbol.valueDeclaration;
+    if (declaration === undefined || !ts.isFunctionDeclaration(declaration) || declaration.body?.statements.length !== 1) return undefined;
+    const statement = declaration.body.statements[0];
+    value = statement !== undefined && ts.isReturnStatement(statement) ? constExpression(checker, statement.expression) : undefined;
+  }
+  return value !== undefined && ts.isObjectLiteralExpression(value) ? value : undefined;
+}
+
 function registrationDefinitions(root: string, program: ts.Program): ReadonlyMap<string, ts.CallExpression | null> {
   const checker = program.getTypeChecker();
   const factories = frameworkSymbols(program, checker);
@@ -140,24 +165,14 @@ function registrationDefinitions(root: string, program: ts.Program): ReadonlyMap
     const key = runtimeRecordId(kind, owner, name);
     found.set(key, found.has(key) ? null : call);
   };
-  for (const sourceFile of program.getSourceFiles()) {
-    const relative = path.relative(path.join(root, "src"), sourceFile.fileName);
-    if (relative.startsWith("..") || path.isAbsolute(relative) || sourceFile.isDeclarationFile) continue;
-    const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node)) {
-        const callee = factory(node);
-        const object = resolvedObjectArgument(checker, node);
-        if (object !== null) {
-          if (callee === "entrypoint" || callee === "processEntrypoint") {
-            add("entrypoint", "application", stringMember(checker, object, "name"), node);
-          }
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
-  }
   const app = applicationConfig(root, program, factories);
+  const entries = app === null ? undefined : entrypointMap(program, objectMember(app, "entrypoints"));
+  for (const process of ["web", "worker", "scheduler"] as const) {
+    const call = entries === undefined ? undefined : constExpression(checker, objectMember(entries, process));
+    if (call === undefined || !ts.isCallExpression(call) || !["entrypoint", "processEntrypoint"].includes(factory(call) ?? "")) continue;
+    const object = resolvedObjectArgument(checker, call);
+    if (object !== null) add("entrypoint", "application", stringMember(checker, object, "name"), call);
+  }
   for (const expression of app === null ? [] : arrayElements(checker, objectMember(app, "features")) ?? []) {
     const call = constExpression(checker, expression);
     if (call === undefined || !ts.isCallExpression(call) || factory(call) !== "defineFeature") continue;
@@ -317,12 +332,8 @@ function routeExportLinkage(root: string, program: ts.Program, graph: Applicatio
     const value = constExpression(checker, expression);
     return application !== undefined && value !== undefined && ts.isPropertyAccessExpression(value) && value.name.text === "graph" && constExpression(checker, value.expression) === application;
   };
-  const object = (expression: ts.Expression | undefined): ts.ObjectLiteralExpression | undefined => {
-    const value = constExpression(checker, expression);
-    return value !== undefined && ts.isObjectLiteralExpression(value) ? value : undefined;
-  };
   const appConfig = applicationConfig(root, program, factories);
-  const entries = appConfig === null ? undefined : object(objectMember(appConfig, "entrypoints"));
+  const entries = appConfig === null ? undefined : entrypointMap(program, objectMember(appConfig, "entrypoints"));
   const web = entries === undefined ? undefined : constExpression(checker, objectMember(entries, "web"));
   const webConfig = web !== undefined && ts.isCallExpression(web) && ["entrypoint", "processEntrypoint"].includes(factory(web) ?? "") ? resolvedObjectArgument(checker, web) : null;
   const bindings = webConfig === null ? [] : (arrayElements(checker, objectMember(webConfig, "bindings")) ?? []).map((expression) => constExpression(checker, expression));
@@ -364,10 +375,10 @@ function routeExportLinkage(root: string, program: ts.Program, graph: Applicatio
         const declaration = symbol === undefined ? undefined : resolvedSymbol(checker, symbol).valueDeclaration;
         if (declaration !== undefined && ts.isBindingElement(declaration) && ts.isObjectBindingPattern(declaration.parent) && ts.isVariableDeclaration(declaration.parent.parent) && (declaration.parent.parent.parent.flags & ts.NodeFlags.Const) !== 0 && declaration.initializer === undefined && declaration.dotDotDotToken === undefined) {
           const property = declaration.propertyName ?? declaration.name;
-          return (ts.isIdentifier(property) || ts.isStringLiteral(property)) && linked(declaration.parent.parent.initializer, property.text);
+          return selected === undefined && (ts.isIdentifier(property) || ts.isStringLiteral(property)) && linked(declaration.parent.parent.initializer, property.text);
         }
       }
-      if (ts.isPropertyAccessExpression(value)) return linked(value.expression, value.name.text);
+      if (ts.isPropertyAccessExpression(value)) return selected === undefined && linked(value.expression, value.name.text);
       if (!ts.isCallExpression(value)) return false;
       const wrapper = factory(value);
       if (wrapper === "nextRouteFor") return selected === undefined && isApplicationGraph(value.arguments[0]) && literal(value.arguments[1]) === routePath && literal(value.arguments[2]) === method;
