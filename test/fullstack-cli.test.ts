@@ -42,6 +42,7 @@ describe("full-stack CLI", () => {
 
   it("returns compact source-linked briefs, traces, unknowns, and verified tests", async () => {
     const fixture = await createAppFixture({
+      "src/app.ts": 'import { defineApp, defineFeature } from "typescript-on-rails"; import { endpoint } from "./features/billing/index.js"; import { healthEndpoint } from "./features/health/index.js"; export const application = defineApp({ features: [defineFeature({ name: "billing", routes: [endpoint] }), defineFeature({ name: "health", routes: [healthEndpoint] })] });\n',
       "src/features/billing/index.ts": [
         'import { action, object, operationRoute } from "typescript-on-rails";',
         "export const total = action({ input: object({}), public: true, run: () => 1 });",
@@ -94,7 +95,7 @@ describe("full-stack CLI", () => {
       assert.equal(brief.contextBenefitClaim, false);
       assert.equal(brief.projectionVersion, 2);
       assert.equal(brief.sha256.length, 64);
-      assert.equal(brief.completeness.complete, true);
+      assert.equal(brief.completeness.complete, false);
       assert.equal(brief.completeness.observations, undefined);
       assert.ok(brief.records.length > 0);
       assert.deepEqual(brief.links.map(({ kind }) => kind), ["entrypoint-route", "route-operation"]);
@@ -114,8 +115,12 @@ describe("full-stack CLI", () => {
       const unknowns = JSON.parse(unknownOutput.value()) as { projectionVersion: number; sha256: string; complete: boolean; counts: Record<string, number>; unknowns: unknown[] };
       assert.equal(unknowns.projectionVersion, 2);
       assert.equal(unknowns.sha256.length, 64);
-      assert.equal(unknowns.complete, true);
-      assert.deepEqual(unknowns.unknowns, []);
+      assert.equal(unknowns.complete, false);
+      assert.deepEqual(unknowns.unknowns, ["/api/billing", "/api/health"].map((name) => ({
+        category: "unknown", kind: "route-export", name, root: fixture.root,
+        file: `src/app${name}/route.ts`,
+        reason: "GET export cannot be linked to its registered web binding through a supported Next wrapper",
+      })));
 
       const testsOutput = stream();
       assert.equal(await runCli(["tests-for", "billing", "--json"], { cwd: fixture.root, stdout: testsOutput, loadFullStackApplication }), 0);

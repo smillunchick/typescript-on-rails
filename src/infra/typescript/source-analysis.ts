@@ -3,8 +3,8 @@ import ts from "typescript";
 
 import type { ArchitectureManifest } from "../../features/architecture/manifest.js";
 import type { CompositionSource, LexicalContextObservation } from "../../features/architecture/manifest-v3.js";
-import { architecture, runtimeRecordId } from "../../features/runtime/index.js";
-import { featureNameFor, isFrameworkImport, resolvedObjectArgument, resolvedSymbol, unwrapConstSafeExpression, unwrapTransparentExpression, variableName } from "./analyze.js";
+import { architecture, runtimeRecordId, type ApplicationGraph } from "../../features/runtime/index.js";
+import { isFrameworkImport, resolvedObjectArgument, resolvedSymbol, unwrapConstSafeExpression, unwrapTransparentExpression, variableName } from "./analyze.js";
 
 architecture.allow({
   rule: "infrastructure-feature-boundary",
@@ -22,11 +22,13 @@ function frameworkSymbols(program: ts.Program, checker: ts.TypeChecker): Readonl
     const specifier = statement.moduleSpecifier;
     if (specifier === undefined || !ts.isStringLiteral(specifier)) continue;
     const fullstack = specifier.text === "@typescript-on-rails/fullstack";
-    if (!fullstack && !isFrameworkImport(file, specifier.text)) continue;
+    const web = specifier.text === "@typescript-on-rails/web" || specifier.text === "@typescript-on-rails/web/next";
+    if (!fullstack && !web && !isFrameworkImport(file, specifier.text)) continue;
     const module = checker.getSymbolAtLocation(specifier);
     if (module === undefined) continue;
     for (const exported of checker.getExportsOfModule(module)) {
       if (fullstack && exported.name !== "processEntrypoint") continue;
+      if (web && !["bindRoute", "nextRoute", "nextRouteFor", "nextRouteExports", "nextRouteExportsFor"].includes(exported.name)) continue;
       const symbol = resolvedSymbol(checker, exported);
       if (symbol.declarations?.length) symbols.set(symbol, exported.name);
     }
@@ -50,59 +52,104 @@ function expressionSymbol(checker: ts.TypeChecker, expression: ts.Expression, vi
 
 // Unlike a schema type, a source identity needs a literal value, not an asserted type.
 function stringMember(checker: ts.TypeChecker, object: ts.ObjectLiteralExpression, name: string): string | null {
-  const members = object.properties.filter((property) => property.name !== undefined && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && property.name.text === name);
-  if (members.length !== 1 || object.properties.some(ts.isSpreadAssignment)) return null;
-  const member = members[0];
-  const value = member !== undefined && ts.isPropertyAssignment(member) ? member.initializer : member !== undefined && ts.isShorthandPropertyAssignment(member) ? member.name : undefined;
-  const resolve = (expression: ts.Expression, visited: Set<ts.Symbol>): string | null => {
-    const current = unwrapConstSafeExpression(expression);
-    if (current === null) return null;
-    if (ts.isStringLiteralLike(current)) return current.text;
-    const referenced = checker.getSymbolAtLocation(ts.isPropertyAccessExpression(current) ? current.name : current);
-    if (referenced === undefined) return null;
-    const symbol = resolvedSymbol(checker, referenced);
-    if (visited.has(symbol)) return null;
-    visited.add(symbol);
-    const declaration = symbol.valueDeclaration;
-    return declaration !== undefined && ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined && (declaration.parent.flags & ts.NodeFlags.Const) !== 0
-      ? resolve(declaration.initializer, visited) : null;
-  };
-  return value === undefined ? null : resolve(value, new Set());
+  const value = constExpression(checker, objectMember(object, name));
+  return value !== undefined && ts.isStringLiteralLike(value) ? value.text : null;
 }
 
-export function registrationSources(root: string, program: ts.Program): RegistrationSources {
+function objectMember(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
+  if (object.properties.some(ts.isSpreadAssignment)) return undefined;
+  const members = object.properties.filter((property) => property.name !== undefined && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && property.name.text === name);
+  const member = members.length === 1 ? members[0] : undefined;
+  return member !== undefined && ts.isPropertyAssignment(member) ? member.initializer
+    : member !== undefined && ts.isShorthandPropertyAssignment(member) ? member.name : undefined;
+}
+
+// Resolve only immutable source references, not inferred types or arbitrary calls.
+function constExpression(checker: ts.TypeChecker, expression: ts.Expression | undefined, visited = new Set<ts.Symbol>()): ts.Expression | undefined {
+  if (expression === undefined) return undefined;
+  const current = unwrapConstSafeExpression(expression);
+  if (current === null) return undefined;
+  if (!ts.isIdentifier(current) && !ts.isPropertyAccessExpression(current)) return current;
+  const referenced = ts.isIdentifier(current) && ts.isShorthandPropertyAssignment(current.parent)
+    ? checker.getShorthandAssignmentValueSymbol(current.parent)
+    : checker.getSymbolAtLocation(ts.isPropertyAccessExpression(current) ? current.name : current);
+  if (referenced === undefined) return undefined;
+  const symbol = resolvedSymbol(checker, referenced);
+  if (visited.has(symbol)) return undefined;
+  visited.add(symbol);
+  const declaration = symbol.valueDeclaration;
+  if (declaration !== undefined && ts.isVariableDeclaration(declaration) && (declaration.parent.flags & ts.NodeFlags.Const) !== 0) {
+    return constExpression(checker, declaration.initializer, visited);
+  }
+  return current;
+}
+
+function arrayElements(checker: ts.TypeChecker, expression: ts.Expression | undefined): readonly ts.Expression[] | undefined {
+  const value = constExpression(checker, expression);
+  return value !== undefined && ts.isArrayLiteralExpression(value) && !value.elements.some(ts.isSpreadElement) ? value.elements : undefined;
+}
+
+function symbolValue(symbol: ts.Symbol | undefined, checker: ts.TypeChecker): ts.Expression | undefined {
+  const declaration = symbol === undefined ? undefined : resolvedSymbol(checker, symbol).valueDeclaration;
+  return declaration !== undefined && ts.isVariableDeclaration(declaration) && (declaration.parent.flags & ts.NodeFlags.Const) !== 0 ? declaration.initializer
+    : declaration !== undefined && ts.isExportAssignment(declaration) ? declaration.expression
+    : declaration !== undefined && ts.isBindingElement(declaration) && ts.isIdentifier(declaration.name) ? declaration.name : undefined;
+}
+
+function applicationExpression(root: string, program: ts.Program): ts.Expression | undefined {
+  const checker = program.getTypeChecker();
+  const file = program.getSourceFile(path.resolve(root, "src/app.ts"));
+  const module = file === undefined ? undefined : checker.getSymbolAtLocation(file);
+  const exports = module === undefined ? [] : checker.getExportsOfModule(module);
+  return constExpression(checker, symbolValue(exports.find(({ name }) => name === "default") ?? exports.find(({ name }) => name === "application"), checker));
+}
+
+function applicationConfig(root: string, program: ts.Program, factories: ReadonlyMap<ts.Symbol, string>): ts.ObjectLiteralExpression | null {
+  const checker = program.getTypeChecker();
+  let value = applicationExpression(root, program);
+  const visited = new Set<ts.Symbol>();
+  while (value !== undefined && ts.isCallExpression(value)) {
+    const symbol = expressionSymbol(checker, value.expression);
+    if (symbol === undefined || visited.has(symbol)) return null;
+    visited.add(symbol);
+    if (factories.get(symbol) === "defineApp") return resolvedObjectArgument(checker, value);
+    // The public reference app uses a zero-argument factory with one return.
+    // Parameters, branches and computed collections are not evaluated here.
+    const declaration = symbol.valueDeclaration;
+    if (value.arguments.length !== 0 || declaration === undefined || !ts.isFunctionDeclaration(declaration) || declaration.body?.statements.length !== 1) return null;
+    const statement = declaration.body.statements[0];
+    value = statement !== undefined && ts.isReturnStatement(statement) ? constExpression(checker, statement.expression) : undefined;
+  }
+  return null;
+}
+
+function registrationDefinitions(root: string, program: ts.Program): ReadonlyMap<string, ts.CallExpression | null> {
   const checker = program.getTypeChecker();
   const factories = frameworkSymbols(program, checker);
-  const found = new Map<string, CompositionSource | null>();
+  const found = new Map<string, ts.CallExpression | null>();
+
+  const factory = (call: ts.CallExpression): string | undefined => {
+    const symbol = expressionSymbol(checker, call.expression);
+    return symbol === undefined ? undefined : factories.get(symbol);
+  };
+  const add = (kind: "entrypoint" | "consumer" | "repository" | "schedule" | "route", owner: string, name: string | null, call: ts.CallExpression): void => {
+    if (name === null || name.trim() === "" || owner.trim() === "") return;
+    const source = call.getSourceFile();
+    const file = path.relative(root, source.fileName).split(path.sep).join("/");
+    if (file.startsWith("../") || path.isAbsolute(file) || source.isDeclarationFile) return;
+    const key = runtimeRecordId(kind, owner, name);
+    found.set(key, found.has(key) ? null : call);
+  };
   for (const sourceFile of program.getSourceFiles()) {
-    const relative = path.relative(path.join(root, "src"), sourceFile.fileName).split(path.sep).join("/");
-    if (relative.startsWith("../") || path.isAbsolute(relative) || sourceFile.isDeclarationFile) continue;
+    const relative = path.relative(path.join(root, "src"), sourceFile.fileName);
+    if (relative.startsWith("..") || path.isAbsolute(relative) || sourceFile.isDeclarationFile) continue;
     const visit = (node: ts.Node): void => {
       if (ts.isCallExpression(node)) {
-        const symbol = expressionSymbol(checker, node.expression);
-        const callee = symbol === undefined ? undefined : factories.get(symbol);
+        const callee = factory(node);
         const object = resolvedObjectArgument(checker, node);
         if (object !== null) {
-          let kind: "route" | "consumer" | "schedule" | "repository" | "entrypoint" | undefined;
-          let owner = featureNameFor(root, sourceFile.fileName);
-          let name = stringMember(checker, object, "name");
-          if (callee === "operationRoute" || callee === "route") {
-            kind = "route";
-            const method = stringMember(checker, object, "method");
-            const routePath = stringMember(checker, object, "path");
-            name = method === null || routePath === null ? null : `${method} ${routePath}`;
-          } else if (callee === "consumer") kind = "consumer";
-          else if (callee === "schedule" || callee === "defineRepository") {
-            kind = callee === "schedule" ? "schedule" : "repository";
-            owner = stringMember(checker, object, "feature");
-          } else if (callee === "entrypoint" || callee === "processEntrypoint") {
-            kind = "entrypoint";
-            owner = "application";
-          }
-          if (kind !== undefined && owner !== null && owner.trim() !== "" && name !== null && name.trim() !== "") {
-            const key = runtimeRecordId(kind, owner, name);
-            const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-            found.set(key, found.has(key) ? null : Object.freeze({ file: `src/${relative}`, line, provenance: "static-registration" }));
+          if (callee === "entrypoint" || callee === "processEntrypoint") {
+            add("entrypoint", "application", stringMember(checker, object, "name"), node);
           }
         }
       }
@@ -110,7 +157,45 @@ export function registrationSources(root: string, program: ts.Program): Registra
     };
     visit(sourceFile);
   }
+  const app = applicationConfig(root, program, factories);
+  for (const expression of app === null ? [] : arrayElements(checker, objectMember(app, "features")) ?? []) {
+    const call = constExpression(checker, expression);
+    if (call === undefined || !ts.isCallExpression(call) || factory(call) !== "defineFeature") continue;
+    const feature = resolvedObjectArgument(checker, call);
+    if (feature === null) continue;
+    const owner = stringMember(checker, feature, "name");
+    if (owner === null) continue;
+    for (const [member, kind, supported] of [
+      ["consumers", "consumer", ["consumer"]],
+      ["repositories", "repository", ["defineRepository"]],
+      ["schedules", "schedule", ["schedule"]],
+      ["routes", "route", ["route", "operationRoute"]],
+    ] as const) {
+      for (const expression of arrayElements(checker, objectMember(feature, member)) ?? []) {
+        const call = constExpression(checker, expression);
+        if (call === undefined || !ts.isCallExpression(call) || !supported.some((name) => name === factory(call))) continue;
+        const object = resolvedObjectArgument(checker, call);
+        if (object === null) continue;
+        if ((kind === "repository" || kind === "schedule") && stringMember(checker, object, "feature") !== owner) continue;
+        const method = stringMember(checker, object, "method");
+        const routePath = stringMember(checker, object, "path");
+        const name = kind === "route" ? method === null || routePath === null ? null : `${method} ${routePath}` : stringMember(checker, object, "name");
+        add(kind, owner, name, call);
+      }
+    }
+  }
   return found;
+}
+
+export function registrationSources(root: string, program: ts.Program): RegistrationSources {
+  return new Map([...registrationDefinitions(root, program)].map(([key, call]) => {
+    const source = call?.getSourceFile();
+    return [key, call === null || source === undefined ? null : Object.freeze({
+      file: path.relative(root, source.fileName).split(path.sep).join("/"),
+      line: source.getLineAndCharacterOfPosition(call.getStart(source)).line + 1,
+      provenance: "static-registration" as const,
+    })];
+  }));
 }
 
 export interface OperationStaticAnalysis {
@@ -217,7 +302,97 @@ export function operationStaticCalls(root: string, base: ArchitectureManifest, p
   return output;
 }
 
-export function exportedRouteMethods(file: string, program: ts.Program): { readonly methods: readonly string[]; readonly unresolved: readonly string[] } {
+// Next wrappers have a bounded linkage contract: graph-based wrappers must use
+// the src/app.ts application export; binding-based wrappers must use the exact
+// binding referenced by its web entrypoint. Other callable code stays unknown.
+function routeExportLinkage(root: string, program: ts.Program, graph: ApplicationGraph): (symbol: ts.Symbol, method: string, routePath: string) => boolean {
+  const checker = program.getTypeChecker();
+  const factories = frameworkSymbols(program, checker);
+  const factory = (call: ts.CallExpression): string | undefined => {
+    const symbol = expressionSymbol(checker, call.expression);
+    return symbol === undefined ? undefined : factories.get(symbol);
+  };
+  const application = applicationExpression(root, program);
+  const isApplicationGraph = (expression: ts.Expression | undefined): boolean => {
+    const value = constExpression(checker, expression);
+    return application !== undefined && value !== undefined && ts.isPropertyAccessExpression(value) && value.name.text === "graph" && constExpression(checker, value.expression) === application;
+  };
+  const object = (expression: ts.Expression | undefined): ts.ObjectLiteralExpression | undefined => {
+    const value = constExpression(checker, expression);
+    return value !== undefined && ts.isObjectLiteralExpression(value) ? value : undefined;
+  };
+  const appConfig = applicationConfig(root, program, factories);
+  const entries = appConfig === null ? undefined : object(objectMember(appConfig, "entrypoints"));
+  const web = entries === undefined ? undefined : constExpression(checker, objectMember(entries, "web"));
+  const webConfig = web !== undefined && ts.isCallExpression(web) && ["entrypoint", "processEntrypoint"].includes(factory(web) ?? "") ? resolvedObjectArgument(checker, web) : null;
+  const bindings = webConfig === null ? [] : (arrayElements(checker, objectMember(webConfig, "bindings")) ?? []).map((expression) => constExpression(checker, expression));
+  const routeConfig = (expression: ts.Expression | undefined): ts.ObjectLiteralExpression | undefined => {
+    const call = constExpression(checker, expression);
+    if (call === undefined || !ts.isCallExpression(call) || !["route", "operationRoute"].includes(factory(call) ?? "")) return undefined;
+    return resolvedObjectArgument(checker, call) ?? undefined;
+  };
+  const literal = (expression: ts.Expression | undefined): string | null => {
+    const value = constExpression(checker, expression);
+    if (value === undefined) return null;
+    if (ts.isStringLiteralLike(value)) return value.text;
+    if (ts.isPropertyAccessExpression(value) && ts.isPropertyAccessExpression(value.expression) && value.expression.name.text === "metadata") {
+      const config = routeConfig(value.expression.expression);
+      if (config !== undefined) return stringMember(checker, config, value.name.text);
+    }
+    return null;
+  };
+  const definitions = registrationDefinitions(root, program);
+  const registeredBinding = (expression: ts.Expression | undefined, method: string, routePath: string): boolean => {
+    const binding = constExpression(checker, expression);
+    if (binding === undefined || !bindings.includes(binding) || !ts.isCallExpression(binding) || factory(binding) !== "bindRoute") return false;
+    const target = constExpression(checker, binding.arguments[0]);
+    const config = routeConfig(target);
+    if (target === undefined || config === undefined || stringMember(checker, config, "method") !== method || stringMember(checker, config, "path") !== routePath) return false;
+    return graph.routes.some((route) => {
+      if (route.name !== `${method} ${routePath}`) return false;
+      return definitions.get(runtimeRecordId("route", route.owner, route.name)) === target;
+    });
+  };
+  return (symbol, method, routePath) => {
+    const visited = new Set<ts.Node>();
+    const linked = (expression: ts.Expression | undefined, selected?: string): boolean => {
+      const value = constExpression(checker, expression);
+      if (value === undefined || visited.has(value)) return false;
+      visited.add(value);
+      if (ts.isIdentifier(value)) {
+        const symbol = checker.getSymbolAtLocation(value);
+        const declaration = symbol === undefined ? undefined : resolvedSymbol(checker, symbol).valueDeclaration;
+        if (declaration !== undefined && ts.isBindingElement(declaration) && ts.isObjectBindingPattern(declaration.parent) && ts.isVariableDeclaration(declaration.parent.parent) && (declaration.parent.parent.parent.flags & ts.NodeFlags.Const) !== 0 && declaration.initializer === undefined && declaration.dotDotDotToken === undefined) {
+          const property = declaration.propertyName ?? declaration.name;
+          return (ts.isIdentifier(property) || ts.isStringLiteral(property)) && linked(declaration.parent.parent.initializer, property.text);
+        }
+      }
+      if (ts.isPropertyAccessExpression(value)) return linked(value.expression, value.name.text);
+      if (!ts.isCallExpression(value)) return false;
+      const wrapper = factory(value);
+      if (wrapper === "nextRouteFor") return selected === undefined && isApplicationGraph(value.arguments[0]) && literal(value.arguments[1]) === routePath && literal(value.arguments[2]) === method;
+      if (wrapper === "nextRouteExportsFor") return selected === method && isApplicationGraph(value.arguments[0]) && literal(value.arguments[1]) === routePath;
+      if (wrapper === "nextRoute") return selected === undefined && registeredBinding(value.arguments[0], method, routePath);
+      if (wrapper === "nextRouteExports") {
+        const handlers = arrayElements(checker, value.arguments[0]);
+        const methods = new Set<string>();
+        return selected === method && handlers !== undefined && handlers.every((expression) => {
+          const binding = constExpression(checker, expression);
+          const config = binding !== undefined && ts.isCallExpression(binding) ? routeConfig(binding.arguments[0]) : undefined;
+          const name = config === undefined ? null : stringMember(checker, config, "method");
+          const path = config === undefined ? null : stringMember(checker, config, "path");
+          if (name === null || path === null || methods.has(name)) return false;
+          methods.add(name);
+          return registeredBinding(expression, name, path);
+        }) && handlers.some((binding) => registeredBinding(binding, method, routePath));
+      }
+      return false;
+    };
+    return linked(symbolValue(symbol, checker));
+  };
+}
+
+export function exportedRouteMethods(file: string, program: ts.Program, linkage?: { readonly root: string; readonly path: string; readonly graph: ApplicationGraph }): { readonly methods: readonly string[]; readonly unresolved: readonly string[] } {
   const checker = program.getTypeChecker();
   const source = program.getSourceFile(path.resolve(file));
   const module = source === undefined ? undefined : checker.getSymbolAtLocation(source);
@@ -253,10 +428,12 @@ export function exportedRouteMethods(file: string, program: ts.Program): { reado
   // exists. Those automatic methods are not additional application behavior.
   const methods = [...names].filter((name) => /^(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(name));
   const exports = new Map(checker.getExportsOfModule(module).map((symbol) => [symbol.name, symbol]));
+  const linked = linkage === undefined ? undefined : routeExportLinkage(linkage.root, program, linkage.graph);
   for (const name of methods) {
     const exported = exports.get(name);
     const symbol = exported === undefined ? undefined : resolvedSymbol(checker, exported);
-    if (symbol === undefined || !symbol.declarations?.length || checker.getSignaturesOfType(checker.getTypeOfSymbolAtLocation(symbol, source), ts.SignatureKind.Call).length === 0) unresolved.push(`${name} export does not resolve to a callable handler`);
+    if (symbol === undefined || !symbol.declarations?.length || checker.getSignaturesOfType(checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(symbol, source)), ts.SignatureKind.Call).length === 0) unresolved.push(`${name} export does not resolve to a callable handler`);
+    else if (linkage !== undefined && linkage.graph.routes.some((route) => route.name === `${name} ${linkage.path}`) && !linked?.(symbol, name, linkage.path)) unresolved.push(`${name} export cannot be linked to its registered web binding through a supported Next wrapper`);
   }
   return { methods: Object.freeze(methods.sort()), unresolved: Object.freeze(unresolved.sort()) };
 }

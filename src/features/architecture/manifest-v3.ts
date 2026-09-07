@@ -526,7 +526,7 @@ function completeness(
       continue;
     }
     if (kind === "route") {
-      const { methods, unresolved } = exportedRouteMethods(path.join(applicationRoot, file), program);
+      const { methods, unresolved } = exportedRouteMethods(path.join(applicationRoot, file), program, graph === undefined ? undefined : { root: applicationRoot, path: discoveredPath, graph });
       for (const reason of unresolved) observations.push({ category: "unknown", kind: "route-export", name: discoveredPath, root: applicationRoot, file, reason });
       if (methods.length === 0 && unresolved.length === 0) {
         observations.push({ category: "unknown", kind: "route", name: discoveredPath, root: applicationRoot, file, reason: "route source has no statically visible HTTP method export" });

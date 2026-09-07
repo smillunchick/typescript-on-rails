@@ -49,6 +49,7 @@ describe("executable repository ownership", () => {
 
   it("projects repository-only proof and governed exception completeness honestly", async () => {
     const fixture = await createAppFixture({
+      "src/app.ts": 'import { defineApp, defineFeature } from "typescript-on-rails"; import { invoices } from "./features/billing/repository.js"; export const application = defineApp({ features: [defineFeature({ name: "billing", repositories: [invoices] })] });\n',
       "src/features/billing/repository.ts": 'import { defineRepository } from "typescript-on-rails"; export const invoices = defineRepository({ name: "invoices", feature: "billing", relations: ["app.invoices"] });\n',
     });
     try {

@@ -138,17 +138,19 @@ describe("Manifest v3 executable application graph", () => {
 
   it("keeps same-local-name provenance separate by owner and resolves framework symbols", async () => {
     const files: Record<string, string> = {
+      "src/app.ts": 'import { defineApp } from "typescript-on-rails"; import { feature as billing } from "./features/billing/index.js"; import { feature as shipping } from "./features/shipping/index.js"; export const application = defineApp({ features: [billing, shipping] });\n',
       "src/factories.ts": 'export { consumer as consume, defineRepository as repository, schedule as recurring } from "typescript-on-rails";\n',
       "src/unrelated.ts": 'function consumer(value: unknown) { return value; } consumer({ name: "target" });\n',
     };
     const features = ["billing", "shipping"].map((owner) => {
       files[`src/features/${owner}/index.ts`] = [
         'import * as factories from "../../factories.js";',
-        'import { event, object } from "typescript-on-rails";',
+        'import { defineFeature, event, object } from "typescript-on-rails";',
         `const Due = event({ owner: "${owner}", name: "Due", payload: object({}) });`,
         'export const target = factories.consume({ name: "target", event: Due, durable: true, handle: () => undefined });',
         `export const records = factories.repository({ name: "records", feature: "${owner}", relations: ["${owner}.records"] });`,
         `export const daily = factories.recurring({ name: "daily", feature: "${owner}", target, occurrences: () => [] });`,
+        `export const feature = defineFeature({ name: "${owner}", consumers: [target], repositories: [records], schedules: [daily] });`,
       ].join("\n");
       const Due = event({ owner, name: "Due", payload: object({}) });
       const target = consumer({ name: "target", event: Due, durable: true, handle: () => undefined });
@@ -173,23 +175,25 @@ describe("Manifest v3 executable application graph", () => {
       assert.deepEqual(direct.composition, manifest.composition);
       await fixture.write("src/features/billing/duplicate.ts", 'import { consumer as other } from "typescript-on-rails"; other({ name: "target", event: undefined as never, handle: () => undefined });\n');
       const duplicate = analyzeApplicationV3(fixture.root, { application });
-      assert.equal(duplicate.composition.find(({ kind, owner }) => kind === "consumer" && owner === "billing")?.detail?.source, undefined);
-      assert.ok(duplicate.completeness.observations.some(({ kind, name, reason }) => kind === "consumer-source" && name === "billing.target" && /multiple/.test(reason)));
+      assert.deepEqual(duplicate.composition, manifest.composition);
+      assert.ok(!duplicate.completeness.observations.some(({ kind }) => kind === "consumer-source"));
       assert.ok(duplicate.composition.find(({ kind, owner }) => kind === "consumer" && owner === "shipping")?.detail?.source);
     } finally { await fixture.cleanup(); }
   });
 
   it("leaves unsupported registration sources unknown instead of trusting type assertions or factory names", async () => {
     const fixture = await createAppFixture({
+      "src/app.ts": 'import { defineApp } from "typescript-on-rails"; import { feature } from "./features/billing/index.js"; export const application = defineApp({ features: [feature] });\n',
       "src/features/billing/index.ts": [
-        'import { consumer as realConsumer, event, object } from "typescript-on-rails";',
+        'import { defineFeature, consumer as realConsumer, event, object } from "typescript-on-rails";',
         'const Due = event({ name: "Due", payload: object({}) });',
         'declare const dynamicName: string;',
-        'realConsumer({ name: dynamicName as "dynamic", event: Due, handle: () => undefined });',
+        'const dynamic = realConsumer({ name: dynamicName as "dynamic", event: Due, handle: () => undefined });',
         'const consumer = (value: unknown) => value;',
-        'consumer({ name: "unrelated", event: Due, handle: () => undefined });',
+        'const unrelated = consumer({ name: "unrelated", event: Due, handle: () => undefined });',
         'function wrap(consumer: typeof realConsumer) { return consumer({ name: "shadowed", event: Due, handle: () => undefined }); }',
         'realConsumer({ name: "", event: Due, handle: () => undefined });',
+        'const shadowed = wrap(realConsumer); export const feature = defineFeature({ name: "billing", consumers: [dynamic, unrelated, shadowed] });',
       ].join("\n"),
     });
     try {
