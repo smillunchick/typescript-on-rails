@@ -30,6 +30,31 @@ The included identity, session, email, storage, payments, and cache adapters are
 
 The neutral scaffold, projects example, and reference app pass local Node 22 and isolated PostgreSQL checks. They do not prove production identity, provider, cloud, migration, operating, recovery, security-review, or launch quality. The first corrected-baseline Bandwidth handoff was inconclusive because the frozen app did not pass complete Manifest v3 and no valid comparable benchmark pair existed. It supports no context-benefit or stronger maturity claim.
 
+## Agent-effort evidence
+
+A paired local experiment started both fresh workers at `c13afb042686bfa826e52746175dc026b4aea30b`. Both had the same task, source tools, permissions, supplied relationship map, and 30-minute limit: change new invitations from 24 to 48 hours while preserving authorization, transactions, and duplicate handling. One worker could also use architecture views. Runtime records identify both as `openai-codex/gpt-6-astra:high`, with one successful model attempt each.
+
+Both made the direct repository change and updated reference/template tests and docs, without framework or dependency edits. Independent HTTP/PostgreSQL runs passed all seven invitation tests in each arm, with no skips: exact 48-hour expiry, first acceptance at 47 hours, rejection at 48 hours, tenant/recipient checks, atomic outbox writes, and duplicate effects. The views arm kept accepted-request replay at 48 hours rather than moving it strictly past the new deadline; that reduces the existing beyond-expiry test coverage, though the replay code did not change. Neither experiment was integrated; this candidate still uses 24 hours.
+
+| Recorded worker measure | Source only | Source plus views |
+| --- | ---: | ---: |
+| Input / output tokens | 50,607 / 7,285 | 53,690 / 8,234 |
+| Cache-read tokens; cache-write tokens | 489,600; 0 | 454,528; 0 |
+| Reported model cost | $1.359920 | $1.403128 |
+| Turns | 17 | 14 |
+| Managed start-to-handoff elapsed time | 624.247 s | 548.514 s |
+
+These counters cover the worker runs, including setup, checks, and reporting—not parent setup, independent review, or total engineering cost. Both used one intentional failing-then-passing test cycle, with no implementation repairs or human intervention during the run. Views found useful registered relationships but did not expose the expiry calculation; the brief stayed unchanged. No analyzer false positives were observed. The views worker's `--help` probe printed usage but exited 2; the source worker's production build reported an unchanged dynamic-filesystem tracing warning.
+
+**Productivity remains unproven.** This is one small pair, not a framework-versus-conventional comparison. Node versions differed (22.23.2 source, 25.9.0 views), and the source worker ran the full repository check while the views worker ran app gates, core/parity tests, and template typechecks. Both met the requested app checks, but elapsed time and cost are not controlled comparisons. The source worker's raw logs under `node_modules` did not survive the managed handoff; its transcript retains command results and test totals. Independent verification used Node 22.23.2 for both, which does not remove differences in the original runs.
+
+To test broader effort reproducibly:
+
+1. Freeze this framework app and a conventional TypeScript app with the same HTTP, PostgreSQL, authorization, outbox, and worker behavior. Use the same dependency versions and external acceptance tests; include initial setup and later maintenance in the measured work.
+2. Before launch, publish the task set, number of repetitions, scoring rules, and stopping budget. Include expiry, authorization, queued-event upgrade, and a new feature. Keep failed and incomplete runs in the results.
+3. Use fresh workers with the same model, effort, permissions, runtime versions, starting information, and required checks. Give each an independent install and disposable non-superuser database. Randomize assignments; separate the views-versus-source question from the framework-versus-conventional question.
+4. Have reviewers who do not know the condition grade behavior, safety, retained tests, and total application complexity. Record setup, implementation, test repairs, review repairs, human interventions, analyzer errors, tokens, cost, and elapsed time through acceptance. Save patches and logs outside disposable dependency directories; report missing counters as unknown.
+
 ## Install
 
 ```sh
