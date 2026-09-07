@@ -1,9 +1,11 @@
 export {
   analyzeTypeContractsWithTypescript,
+  analyzeProgramWithTypescript,
   analyzeWithTypescript,
   type AnalyzedCallbackTypeContract,
   type TypeContractAnalysis,
 } from "./analyze.js";
+export { registrationSources, operationStaticCalls, exportedRouteMethods, type RegistrationSources, type OperationStaticAnalysis } from "./source-analysis.js";
 export {
   extractAdapterOperationsFacet,
   extractRuntimeSchemaFacet,

@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import ts from "typescript";
+import { analyzeProgramWithTypescript, registrationSources, operationStaticCalls, exportedRouteMethods, type RegistrationSources, type OperationStaticAnalysis } from "../../infra/typescript/index.js";
 
 import { architecture, relationExceptionIssues, runtimeRecordId } from "../runtime/index.js";
 import {
@@ -25,7 +26,7 @@ architecture.allow({
 });
 architecture.allow({
   rule: "feature-infrastructure-boundary",
-  reason: "Manifest v3 consumes the one repository package-capability catalog owned by project infrastructure.",
+  reason: "Manifest v3 uses the shared TypeScript analysis and package-capability catalog owned by infrastructure.",
 });
 
 export const MANIFEST_V3_COMPOSITION_PROTOCOL_VERSION = 4 as const;
@@ -150,7 +151,7 @@ function walk(directory: string, root: string, output: string[]): void {
     if (entry.name === "node_modules" || entry.name === "dist" || entry.name.startsWith(".")) continue;
     const target = path.join(directory, entry.name);
     if (entry.isDirectory()) walk(target, root, output);
-    else if (entry.isFile() && /\.(?:ts|tsx)$/.test(entry.name)) output.push(path.relative(root, target).split(path.sep).join("/"));
+    else if (entry.isFile() && /\.[jt]sx?$/.test(entry.name)) output.push(path.relative(root, target).split(path.sep).join("/"));
   }
 }
 
@@ -219,79 +220,6 @@ function discoveredFiles(root: string): string[] {
   return output.sort();
 }
 
-type SourceFileCache = Map<string, ts.SourceFile>;
-
-function parsedSourceFile(file: string, cache: SourceFileCache): ts.SourceFile {
-  const cached = cache.get(file);
-  if (cached !== undefined) return cached;
-  const parsed = ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
-  cache.set(file, parsed);
-  return parsed;
-}
-
-function callName(expression: ts.Expression): string | undefined {
-  if (ts.isIdentifier(expression)) return expression.text;
-  if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
-  return undefined;
-}
-
-function propertyValue(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
-  for (const property of object.properties) {
-    if (!ts.isPropertyAssignment(property)) continue;
-    const propertyName = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)
-      ? property.name.text
-      : undefined;
-    if (propertyName === name) return property.initializer;
-  }
-  return undefined;
-}
-
-function literalText(value: ts.Expression | undefined): string | undefined {
-  return value !== undefined && ts.isStringLiteralLike(value) ? value.text : undefined;
-}
-
-function registrationSources(root: string, cache: SourceFileCache): ReadonlyMap<string, CompositionSource> {
-  const found = new Map<string, CompositionSource | null>();
-  const record = (key: string, source: CompositionSource): void => {
-    found.set(key, found.has(key) ? null : source);
-  };
-  for (const relative of discoveredFiles(path.join(root, "src"))) {
-    const file = path.join(root, "src", relative);
-    const sourceFile = parsedSourceFile(file, cache);
-    const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && node.arguments[0] !== undefined && ts.isObjectLiteralExpression(node.arguments[0])) {
-        const callee = callName(node.expression);
-        const object = node.arguments[0];
-        let key: string | undefined;
-        if (callee === "operationRoute" || callee === "route") {
-          const method = literalText(propertyValue(object, "method"));
-          const routePath = literalText(propertyValue(object, "path"));
-          if (method !== undefined && routePath !== undefined) key = `route:${method} ${routePath}`;
-        } else if (callee === "consumer") {
-          const name = literalText(propertyValue(object, "name"));
-          if (name !== undefined) key = `consumer:${name}`;
-        } else if (callee === "schedule") {
-          const name = literalText(propertyValue(object, "name"));
-          if (name !== undefined) key = `schedule:${name}`;
-        } else if (callee === "defineRepository") {
-          const name = literalText(propertyValue(object, "name"));
-          if (name !== undefined) key = `repository:${name}`;
-        } else if (callee === "entrypoint" || callee === "processEntrypoint") {
-          const name = literalText(propertyValue(object, "name"));
-          if (name !== undefined) key = `entrypoint:${name}`;
-        }
-        if (key !== undefined) {
-          const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-          record(key, Object.freeze({ file: `src/${relative}`, line, provenance: "static-registration" as const }));
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
-  }
-  return new Map([...found].flatMap(([key, source]) => source === null ? [] : [[key, source]]));
-}
-
 export interface LexicalContextObservation {
   readonly member: string;
   readonly file: string;
@@ -313,148 +241,15 @@ export function isLexicalContextObservation(value: unknown): value is LexicalCon
     && (value.event === undefined || typeof value.event === "string");
 }
 
-function expressionPath(expression: ts.Expression): string | undefined {
-  if (ts.isIdentifier(expression)) return expression.text;
-  if (ts.isPropertyAccessExpression(expression)) {
-    const parent = expressionPath(expression.expression);
-    return parent === undefined ? undefined : `${parent}.${expression.name.text}`;
-  }
-  return undefined;
-}
-
-interface OperationStaticAnalysis {
-  readonly observations: readonly LexicalContextObservation[];
-  readonly resolution: "resolved" | "context-unresolved" | "source-unresolved";
-}
-
-function operationStaticCalls(
-  root: string,
-  base: ArchitectureManifest,
-  cache: SourceFileCache,
-): ReadonlyMap<string, OperationStaticAnalysis> {
-  const output = new Map<string, OperationStaticAnalysis>();
-  for (const operation of base.operations) {
-    if (operation.feature === null) continue;
-    const key = `${operation.feature}:${operation.name}`;
-    try {
-      const file = path.join(root, operation.file);
-      const sourceFile = parsedSourceFile(file, cache);
-      const observations: LexicalContextObservation[] = [];
-      let resolution: OperationStaticAnalysis["resolution"] = "context-unresolved";
-      const inspectRun = (run: ts.ArrowFunction | ts.FunctionExpression | ts.MethodDeclaration): OperationStaticAnalysis["resolution"] => {
-        const context = run.parameters[1]?.name;
-        if (context === undefined) return "resolved";
-        if (!ts.isIdentifier(context) || run.body === undefined) return "context-unresolved";
-        const observe = (
-          node: ts.Node,
-          member: string,
-          state: LexicalContextObservation["state"],
-          nested: boolean,
-          event?: string,
-        ): void => {
-          observations.push(Object.freeze({
-            member,
-            file: operation.file,
-            line: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
-            state,
-            scope: nested ? "nested-function" : "run-body",
-            runtimeReachability: "unknown",
-            ...(event === undefined ? {} : { event }),
-          }));
-        };
-        const computedContextMember = (expression: ts.Expression): string | undefined => {
-          if (ts.isElementAccessExpression(expression)) {
-            const parent = expressionPath(expression.expression) ?? computedContextMember(expression.expression);
-            return parent === context.text || parent?.startsWith(`${context.text}.`) === true ? `${parent}[computed]` : undefined;
-          }
-          if (ts.isPropertyAccessExpression(expression)) {
-            const parent = computedContextMember(expression.expression);
-            return parent === undefined ? undefined : `${parent}.${expression.name.text}`;
-          }
-          return undefined;
-        };
-        const visit = (node: ts.Node, nested: boolean): void => {
-          if (ts.isVariableDeclaration(node) && node.initializer !== undefined) {
-            const source = expressionPath(node.initializer);
-            if (source?.startsWith(`${context.text}.`) === true) observe(node, source, "alias-unresolved", nested);
-          }
-          if (ts.isCallExpression(node)) {
-            const member = expressionPath(node.expression);
-            if (member?.startsWith(`${context.text}.`) === true) {
-              const eventArgument = node.arguments[0];
-              observe(
-                node,
-                member,
-                "direct",
-                nested,
-                member.endsWith(".appendOutbox") && eventArgument !== undefined && ts.isIdentifier(eventArgument)
-                  ? eventArgument.text
-                  : undefined,
-              );
-            } else {
-              const computed = computedContextMember(node.expression);
-              if (computed !== undefined) observe(node, computed, "computed-unresolved", nested);
-            }
-          }
-          const childNested = nested || (ts.isFunctionLike(node) && node !== run);
-          ts.forEachChild(node, (child) => visit(child, childNested));
-        };
-        visit(run.body, false);
-        return "resolved";
-      };
-      for (const statement of sourceFile.statements) {
-        if (!ts.isVariableStatement(statement)) continue;
-        for (const declaration of statement.declarationList.declarations) {
-          if (!ts.isIdentifier(declaration.name) || declaration.name.text !== operation.name || declaration.initializer === undefined || !ts.isCallExpression(declaration.initializer)) continue;
-          const config = declaration.initializer.arguments[0];
-          if (config === undefined || !ts.isObjectLiteralExpression(config)) continue;
-          for (const property of config.properties) {
-            if (!ts.isMethodDeclaration(property) && !ts.isPropertyAssignment(property)) continue;
-            const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) ? property.name.text : undefined;
-            if (name !== "run") continue;
-            if (ts.isMethodDeclaration(property)) resolution = inspectRun(property);
-            else if (ts.isArrowFunction(property.initializer) || ts.isFunctionExpression(property.initializer)) resolution = inspectRun(property.initializer);
-          }
-        }
-      }
-      observations.sort((left, right) => compareText(left.file, right.file) || left.line - right.line || compareText(`${left.member}:${left.state}`, `${right.member}:${right.state}`));
-      output.set(key, Object.freeze({ observations: Object.freeze(observations), resolution }));
-    } catch {
-      output.set(key, Object.freeze({ observations: Object.freeze([]), resolution: "source-unresolved" }));
-    }
-  }
-  return output;
-}
-
-function exportedRouteMethods(file: string, cache: SourceFileCache): readonly string[] {
-  const sourceFile = parsedSourceFile(file, cache);
-  const methods = new Set<string>();
-  for (const statement of sourceFile.statements) {
-    const exported =
-      ts.canHaveModifiers(statement) &&
-      ts.getModifiers(statement)?.some(({ kind }) => kind === ts.SyntaxKind.ExportKeyword) === true;
-    if (!exported) continue;
-    if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
-      if (/^(?:GET|POST|PUT|PATCH|DELETE)$/.test(statement.name.text)) methods.add(statement.name.text);
-    } else if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        if (ts.isIdentifier(declaration.name) && /^(?:GET|POST|PUT|PATCH|DELETE)$/.test(declaration.name.text)) {
-          methods.add(declaration.name.text);
-        }
-      }
-    }
-  }
-  return Object.freeze([...methods].sort());
-}
-
-function appPath(sourcePath: string, kind: "route" | "page"): string | undefined {
-  const match = new RegExp(`^app/(.*?)(?:/)?${kind}\\.(?:ts|tsx)$`).exec(sourcePath);
-  if (match === null) return undefined;
-  const segments = (match[1] ?? "")
-    .split("/")
-    .filter((segment) => segment !== "" && !/^\(.+\)$/.test(segment))
-    .map((segment) => segment.replace(/^\[\.\.\.([^\]]+)\]$/, ":$1*").replace(/^\[([^\]]+)\]$/, ":$1"));
-  return `/${segments.join("/")}`;
+function appPath(sourcePath: string): string | undefined {
+  const segments = sourcePath.split("/").slice(0, -1);
+  // Optional catch-all and intercepted paths need host routing information that
+  // the framework path contract does not contain. Do not invent a public path.
+  if (segments.some((segment) => segment.startsWith("[[") || /^\(\.{1,3}\)/.test(segment))) return undefined;
+  return `/${segments
+    .filter((segment) => segment !== "" && !/^\(.+\)$/.test(segment) && !segment.startsWith("@"))
+    .map((segment) => segment.replace(/^\[\.\.\.([^\]]+)\]$/, ":$1*").replace(/^\[([^\]]+)\]$/, ":$1").replace(/%5F/ig, "_"))
+    .join("/")}`;
 }
 
 function immutableManifestValue(value: unknown): unknown {
@@ -483,7 +278,7 @@ function sourceDetail(
 function compose(
   graph: ApplicationGraph | undefined,
   base: ArchitectureManifest,
-  sources: ReadonlyMap<string, CompositionSource>,
+  sources: RegistrationSources,
   calls: ReadonlyMap<string, OperationStaticAnalysis>,
 ): ComposedSemanticRecord[] {
   if (graph === undefined) return [];
@@ -522,7 +317,7 @@ function compose(
       target: item.definition.target.metadata.name,
       event: item.definition.target.event.name,
       version: item.definition.target.event.version,
-    }, sources.get(`schedule:${item.name}`)),
+    }, sources.get(runtimeRecordId("schedule", item.owner, item.name)) ?? undefined),
   });
   for (const item of graph.repositories) records.push({
     kind: "repository",
@@ -532,7 +327,7 @@ function compose(
       relations: item.definition.relations,
       evidence: "declared-registration",
       sqlVerified: false,
-    }, sources.get(`repository:${item.name}`)),
+    }, sources.get(runtimeRecordId("repository", item.owner, item.name)) ?? undefined),
   });
   for (const relation of graph.relations) records.push({
     kind: "relation",
@@ -585,7 +380,7 @@ function compose(
     kind: "route",
     owner: item.owner,
     name: item.name,
-    detail: sourceDetail({}, sources.get(`route:${item.name}`)),
+    detail: sourceDetail({}, sources.get(runtimeRecordId("route", item.owner, item.name)) ?? undefined),
   });
   for (const item of graph.events) records.push({ kind: "event", owner: item.owner, name: item.name, detail: { version: item.definition.version } });
   for (const item of graph.consumers) records.push({
@@ -594,7 +389,7 @@ function compose(
     name: item.name,
     detail: sourceDetail(
       { event: item.definition.metadata.event, durable: item.definition.metadata.durable },
-      sources.get(`consumer:${item.name}`),
+      sources.get(runtimeRecordId("consumer", item.owner, item.name)) ?? undefined,
     ),
   });
   for (const [process, entry] of Object.entries(graph.entrypoints)) {
@@ -602,7 +397,7 @@ function compose(
       kind: "entrypoint",
       owner: "application",
       name: entry.metadata.name,
-      detail: sourceDetail({ process }, sources.get(`entrypoint:${entry.metadata.name}`)),
+      detail: sourceDetail({ process }, sources.get(runtimeRecordId("entrypoint", "application", entry.metadata.name)) ?? undefined),
     });
   }
   for (const test of graph.tests) for (const file of test.files) records.push({
@@ -641,7 +436,8 @@ function completeness(
   applicationRoot: string,
   base: ArchitectureManifest,
   graph: ApplicationGraph | undefined,
-  sourceFiles: SourceFileCache,
+  program: ts.Program,
+  sources: RegistrationSources,
   composition: readonly ComposedSemanticRecord[],
   workspaces: readonly WorkspaceArchitectureManifest[],
   additionalObservations: readonly CompletenessObservation[] = [],
@@ -662,7 +458,7 @@ function completeness(
     for (const record of composition) {
       if ((record.kind === "model" || record.kind === "route" || record.kind === "consumer" || record.kind === "entrypoint" || record.kind === "repository" || record.kind === "schedule") &&
           (typeof record.detail?.source !== "object" || record.detail.source === null)) {
-        observations.push({ category: "unknown", kind: `${record.kind}-source`, name: `${record.owner}.${record.name}`, root: applicationRoot, reason: "registered runtime object has no unique static source provenance" });
+        observations.push({ category: "unknown", kind: `${record.kind}-source`, name: `${record.owner}.${record.name}`, root: applicationRoot, reason: sources.get(runtimeRecordId(record.kind, record.owner, record.name)) === null ? "multiple framework registrations match this owner and name" : "no supported framework registration resolves to this owner and name" });
       }
       if (record.kind === "operation" && record.detail?.contextObservationResolution !== "resolved") {
         observations.push({ category: "unknown", kind: "operation-context-observations", name: `${record.owner}.${record.name}`, root: applicationRoot, reason: "lexical context-member observation could not be resolved" });
@@ -716,21 +512,30 @@ function completeness(
       .filter(({ kind, detail }) => kind === "page" && typeof detail?.path === "string")
       .map(({ detail }) => String(detail?.path)),
   );
-  for (const file of discoveredFiles(path.join(applicationRoot, "src"))) {
-    if (/(^|\/)route\.(?:ts|tsx)$/.test(file)) {
-      const discoveredPath = appPath(file, "route") ?? file;
-      const methods = exportedRouteMethods(path.join(applicationRoot, "src", file), sourceFiles);
-      if (methods.length === 0) {
-        observations.push({ category: "unknown", kind: "route", name: discoveredPath, root: applicationRoot, file: `src/${file}`, reason: "route-like source has no statically visible HTTP method export" });
+  // Next gives root app/ precedence over src/app/.
+  let hostRoot = "src/app";
+  try { if (statSync(path.join(applicationRoot, "app")).isDirectory()) hostRoot = "app"; } catch { /* No root app directory. */ }
+  for (const relative of discoveredFiles(path.join(applicationRoot, hostRoot))) {
+    if (relative.split("/").some((segment) => segment.startsWith("_"))) continue;
+    const kind = /(^|\/)route\.[jt]sx?$/.test(relative) ? "route" : /(^|\/)page\.[jt]sx?$/.test(relative) ? "page" : undefined;
+    if (kind === undefined) continue;
+    const file = `${hostRoot}/${relative}`;
+    const discoveredPath = appPath(relative);
+    if (discoveredPath === undefined) {
+      observations.push({ category: "unknown", kind: `${kind}-path`, name: file, root: applicationRoot, file, reason: "optional catch-all or intercepted host path cannot be resolved to a framework path" });
+      continue;
+    }
+    if (kind === "route") {
+      const { methods, unresolved } = exportedRouteMethods(path.join(applicationRoot, file), program);
+      for (const reason of unresolved) observations.push({ category: "unknown", kind: "route-export", name: discoveredPath, root: applicationRoot, file, reason });
+      if (methods.length === 0 && unresolved.length === 0) {
+        observations.push({ category: "unknown", kind: "route", name: discoveredPath, root: applicationRoot, file, reason: "route source has no statically visible HTTP method export" });
       }
       for (const method of methods) {
         const name = `${method} ${discoveredPath}`;
-        if (!declaredRoutes.has(name)) observations.push({ category: "discovered-undeclared", kind: "route", name, root: applicationRoot, file: `src/${file}`, reason: "HTTP method export is not registered in the executable graph" });
+        if (!declaredRoutes.has(name)) observations.push({ category: "discovered-undeclared", kind: "route", name, root: applicationRoot, file, reason: "HTTP method export is not registered in the executable graph" });
       }
-    } else if (/(^|\/)page\.(?:ts|tsx)$/.test(file)) {
-      const discoveredPath = appPath(file, "page") ?? file;
-      if (!declaredPagePaths.has(discoveredPath)) observations.push({ category: "discovered-undeclared", kind: "page", name: discoveredPath, root: applicationRoot, file: `src/${file}`, reason: "page source is not registered in the executable graph" });
-    }
+    } else if (!declaredPagePaths.has(discoveredPath)) observations.push({ category: "discovered-undeclared", kind: "page", name: discoveredPath, root: applicationRoot, file, reason: "page source is not registered in the executable graph" });
   }
   const declaredModels = new Set(composition.filter(({ kind }) => kind === "model").map(({ owner, name }) => `${owner}:${name}`));
   for (const model of base.models) {
@@ -879,7 +684,7 @@ export function analyzeApplicationV3(applicationRoot: string, options: AnalyzeAp
     : { ...baseOptions, packageCapabilitiesV2: suppliedCapabilities };
   const selectedPolicy = selectPackagePolicy(applicationRoot, catalogOptions);
   const baseAnalysisOptions = { ...baseOptions, [PRECOMPUTED_PACKAGE_POLICY]: selectedPolicy };
-  const base = analyzeApplication(applicationRoot, baseAnalysisOptions);
+  const { manifest: base, program } = analyzeProgramWithTypescript(applicationRoot, baseAnalysisOptions);
   const capabilities = packageCapabilitiesFromCatalog(selectedPolicy.catalog);
   const versionObservations: CompletenessObservation[] = packageCatalogObservations(applicationRoot, selectedPolicy.catalog, base.packagePolicy);
   const workspaces: WorkspaceArchitectureManifest[] = [{
@@ -912,10 +717,10 @@ export function analyzeApplicationV3(applicationRoot: string, options: AnalyzeAp
     });
   }
   const graph = application?.graph;
-  const sourceFiles: SourceFileCache = new Map();
+  const sources = graph === undefined ? new Map() : registrationSources(applicationRoot, program);
   const composition = graph === undefined
     ? []
-    : compose(graph, base, registrationSources(applicationRoot, sourceFiles), operationStaticCalls(applicationRoot, base, sourceFiles));
+    : compose(graph, base, sources, operationStaticCalls(applicationRoot, base, program));
   const linkage = Object.freeze({ protocolVersion: MANIFEST_V3_LINKAGE_PROTOCOL_VERSION, links: Object.freeze([...(graph?.links ?? [])]) });
   return Object.freeze({
     version: 3,
@@ -924,7 +729,7 @@ export function analyzeApplicationV3(applicationRoot: string, options: AnalyzeAp
     workspaces: Object.freeze(workspaces),
     composition: Object.freeze(composition),
     linkage,
-    completeness: completeness(applicationRoot, base, graph, sourceFiles, composition, workspaces, versionObservations, asOf),
+    completeness: completeness(applicationRoot, base, graph, program, sources, composition, workspaces, versionObservations, asOf),
     packageCapabilities: Object.freeze([...capabilities].sort((left, right) => compareText(left.package, right.package))),
   });
 }

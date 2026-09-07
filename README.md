@@ -188,7 +188,9 @@ app tests-for billing --json
 app unknowns --json
 ```
 
-Briefs, traces, test views, unknowns, and check results use the same canonical selector and SHA-256 projection envelope. A simple name that matches more than one owner fails with exact candidates. Trace `links` contain only verified graph links; bounded source observations appear separately under `lexicalObservations`.
+Briefs, traces, test views, unknowns, and check results use the same canonical selector and SHA-256 projection envelope. A simple name that matches more than one owner fails with exact candidates. Trace `links` contain only verified graph links; bounded source observations appear separately under `lexicalObservations`. These observations follow ordinary context destructuring and `const` aliases, respect local names that hide outer names, and do not prove that a call runs.
+
+Manifest v3 matches registration sources by framework symbol, owner, and name. Import aliases and re-exports work; unrelated same-name factories do not count. Missing or competing sources remain `unknown`. Next host checks include explicit `HEAD` and `OPTIONS` exports, but do not require separate registrations for Next's automatic methods. Checks follow root `app/` before `src/app/`, route groups, parallel slots, dynamic segments, and required catch-all segments. Optional catch-all paths, intercepted paths, and unresolved exports remain `unknown` rather than receiving a guessed path or handler. The core does not load Next to make these checks.
 
 ## Migration and reference application
 

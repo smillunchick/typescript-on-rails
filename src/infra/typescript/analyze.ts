@@ -194,7 +194,7 @@ function diagnostic(
   };
 }
 
-function featureNameFor(root: string, fileName: string): string | null {
+export function featureNameFor(root: string, fileName: string): string | null {
   const relative = slash(path.relative(path.join(root, "src", "features"), fileName));
   if (relative.startsWith("../") || relative === ".." || path.isAbsolute(relative)) return null;
   return relative.split("/")[0] || null;
@@ -292,7 +292,7 @@ function discoverFeatures(root: string, files: readonly ts.SourceFile[]): Featur
   return [...records].map(([name, value]) => ({ name, ...value })).sort((a, b) => compareText(a.name, b.name));
 }
 
-function isFrameworkImport(sourceFile: ts.SourceFile, specifier: string): boolean {
+export function isFrameworkImport(sourceFile: ts.SourceFile, specifier: string): boolean {
   if (specifier === FRAMEWORK_PACKAGE || specifier.startsWith(`${FRAMEWORK_PACKAGE}/`)) return true;
   if (
     specifier !== "./architecture.js" &&
@@ -335,7 +335,7 @@ function primitiveForCall(call: ts.CallExpression, bindings: FrameworkBindings):
   return null;
 }
 
-function unwrapTransparentExpression(expression: ts.Expression): ts.Expression {
+export function unwrapTransparentExpression(expression: ts.Expression): ts.Expression {
   let current = expression;
   while (
     ts.isParenthesizedExpression(current)
@@ -383,7 +383,7 @@ function directObjectArgument(call: ts.CallExpression): ts.ObjectLiteralExpressi
   return ts.isObjectLiteralExpression(value) ? value : null;
 }
 
-function unwrapConstSafeExpression(expression: ts.Expression): ts.Expression | null {
+export function unwrapConstSafeExpression(expression: ts.Expression): ts.Expression | null {
   let current = expression;
   while (
     ts.isParenthesizedExpression(current)
@@ -443,7 +443,7 @@ function resolvedConstObjectExpression(
   return resolvedConstObjectExpression(checker, declaration.initializer, visited);
 }
 
-function resolvedObjectArgument(checker: ts.TypeChecker, call: ts.CallExpression): ts.ObjectLiteralExpression | null {
+export function resolvedObjectArgument(checker: ts.TypeChecker, call: ts.CallExpression): ts.ObjectLiteralExpression | null {
   const first = call.arguments[0];
   if (first === undefined) return null;
   return directObjectArgument(call) ?? resolvedConstObjectExpression(checker, first, new Set());
@@ -461,7 +461,7 @@ function variableDeclaration(node: ts.Node): ts.VariableDeclaration | null {
   return ts.isVariableDeclaration(declaration) && declaration.initializer === current ? declaration : null;
 }
 
-function variableName(node: ts.Node): string | null {
+export function variableName(node: ts.Node): string | null {
   const declaration = variableDeclaration(node);
   return declaration !== null && ts.isIdentifier(declaration.name) ? declaration.name.text : null;
 }
@@ -1060,7 +1060,7 @@ function symbolKind(symbol: ts.Symbol): string {
   return "value";
 }
 
-function resolvedSymbol(checker: ts.TypeChecker, symbol: ts.Symbol): ts.Symbol {
+export function resolvedSymbol(checker: ts.TypeChecker, symbol: ts.Symbol): ts.Symbol {
   return (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(symbol) : symbol;
 }
 
@@ -1490,10 +1490,10 @@ function uniqueDependencies(dependencies: readonly DependencyManifest[]): Depend
   }));
 }
 
-export function analyzeTypeContractsWithTypescript(
+export function analyzeProgramWithTypescript(
   applicationRoot: string,
   options: AnalyzeApplicationOptions = {},
-): TypeContractAnalysis {
+): TypeContractAnalysis & { readonly program: ts.Program } {
   const root = path.resolve(applicationRoot);
   const loaded = loadProgram(root, options);
   const checker = loaded.program.getTypeChecker();
@@ -1587,6 +1587,7 @@ export function analyzeTypeContractsWithTypescript(
   output.diagnostics.sort((a, b) => compareLocated(a, b) || compareText(a.rule, b.rule) || compareText(a.message, b.message));
 
   return {
+    program: loaded.program,
     manifest: {
       version: 2,
       compiler: {
@@ -1611,6 +1612,11 @@ export function analyzeTypeContractsWithTypescript(
     },
     callbacks: callbacks.sort((left, right) => compareNamed(left, right)),
   };
+}
+
+export function analyzeTypeContractsWithTypescript(applicationRoot: string, options: AnalyzeApplicationOptions = {}): TypeContractAnalysis {
+  const { manifest, callbacks } = analyzeProgramWithTypescript(applicationRoot, options);
+  return { manifest, callbacks };
 }
 
 export function analyzeWithTypescript(applicationRoot: string, options: AnalyzeApplicationOptions = {}): ArchitectureManifest {
