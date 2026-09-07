@@ -56,7 +56,8 @@ describe("installed full-stack application loader", () => {
   });
 
   it("follows registered entrypoints through aliases and bounded factories, excluding same-name decoys", async () => {
-    for (const shape of ["computed", "literal", "factory"] as const) {
+    for (const shape of ["computed-key", "computed", "literal", "factory"] as const) {
+      const unresolved = shape === "computed-key" || shape === "computed";
       const root = await mkdtemp(path.join(tmpdir(), "tor-entrypoint-membership-"));
       try {
         for (const file of ["src", "test", "package.json", "tsconfig.json", "next-env.d.ts", "fullstack.config.mjs"]) {
@@ -74,19 +75,33 @@ describe("installed full-stack application loader", () => {
           app = app.replace("entrypoints: { web: webEntrypoint }", "entrypoints: selectedEntrypoints()");
           app += '\nfunction selectedEntrypoints() { return Object.freeze({ web: webEntrypoint }); }\n';
         }
+        if (shape === "computed-key") {
+          app = 'import { unused } from "./infra/decoy.js";\nconst key = ["w", "eb"].join("");\n' + app.replace("entrypoints: { web: webEntrypoint }", "entrypoints: { web: unused, [key]: webEntrypoint }");
+        }
         await writeFile(appFile, app);
+        if (shape === "computed-key") {
+          const identity = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", [
+            'import assert from "node:assert/strict";',
+            'import { application } from "./src/app.ts";',
+            'import { webEntrypoint } from "./src/infra/entrypoints.ts";',
+            'import { unused } from "./src/infra/decoy.ts";',
+            'assert.equal(application.graph.entrypoints.web, webEntrypoint);',
+            'assert.notEqual(application.graph.entrypoints.web, unused);',
+          ].join("\n")], { cwd: root, encoding: "utf8", timeout: 60_000 });
+          assert.equal(identity.status, 0, identity.stderr);
+        }
         const cli = path.resolve("dist/bin.js");
         const manifestResult = spawnSync(process.execPath, [cli, "manifest", "--v3", "--json"], { cwd: root, encoding: "utf8", timeout: 60_000 });
         assert.equal(manifestResult.status, 0, manifestResult.stderr);
         const manifest = JSON.parse(manifestResult.stdout);
         const record = manifest.composition.find((entry: { kind: string; name: string }) => entry.kind === "entrypoint" && entry.name === "next-web");
-        assert.deepEqual(record.detail.source, shape === "computed" ? undefined : { file: "src/infra/entrypoints.ts", line: 5, provenance: "static-registration" }, shape);
+        assert.deepEqual(record.detail.source, unresolved ? undefined : { file: "src/infra/entrypoints.ts", line: 5, provenance: "static-registration" }, shape);
         const result = spawnSync(process.execPath, [cli, "check", "--json"], { cwd: root, encoding: "utf8", timeout: 60_000 });
-        assert.equal(result.status, shape === "computed" ? 1 : 0, `${shape}\n${result.stdout}\n${result.stderr}`);
+        assert.equal(result.status, unresolved ? 1 : 0, `${shape}\n${result.stdout}\n${result.stderr}`);
         const receipt = JSON.parse(result.stdout);
-        assert.equal(receipt.ok, shape !== "computed");
-        assert.equal(receipt.executable.complete, shape !== "computed");
-        assert.deepEqual(receipt.executable.unknowns.map((entry: { kind: string; name: string }) => [entry.kind, entry.name]), shape === "computed" ? [["entrypoint-source", "application.next-web"]] : []);
+        assert.equal(receipt.ok, !unresolved);
+        assert.equal(receipt.executable.complete, !unresolved);
+        assert.deepEqual(receipt.executable.unknowns.map((entry: { kind: string; name: string }) => [entry.kind, entry.name]), unresolved ? [["entrypoint-source", "application.next-web"]] : []);
       } finally { await rm(root, { recursive: true, force: true }); }
     }
   });

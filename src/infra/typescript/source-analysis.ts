@@ -57,7 +57,7 @@ function stringMember(checker: ts.TypeChecker, object: ts.ObjectLiteralExpressio
 }
 
 function objectMember(object: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
-  if (object.properties.some(ts.isSpreadAssignment)) return undefined;
+  if (object.properties.some((property) => ts.isSpreadAssignment(property) || (property.name !== undefined && ts.isComputedPropertyName(property.name)))) return undefined;
   const members = object.properties.filter((property) => property.name !== undefined && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && property.name.text === name);
   const member = members.length === 1 ? members[0] : undefined;
   return member !== undefined && ts.isPropertyAssignment(member) ? member.initializer
