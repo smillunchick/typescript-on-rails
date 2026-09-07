@@ -41,8 +41,12 @@ describe("production-shaped full-stack reference", () => {
     assert.deepEqual(application.graph.links.map(({ kind }) => kind), [
       "consumer-event",
       "consumer-event",
+      "consumer-event",
       "entrypoint-consumer",
       "entrypoint-consumer",
+      "entrypoint-consumer",
+      "entrypoint-route",
+      "entrypoint-route",
       "entrypoint-route",
       "entrypoint-route",
       "entrypoint-schedule",
@@ -50,6 +54,9 @@ describe("production-shaped full-stack reference", () => {
       "feature-adapter",
       "feature-adapter",
       "repository-relation",
+      "repository-relation",
+      "route-operation",
+      "route-operation",
       "route-operation",
       "route-operation",
       "schedule-consumer",
@@ -58,7 +65,10 @@ describe("production-shaped full-stack reference", () => {
     assert.equal(application.adapters.identity, identity);
     assert.equal(application.adapters.session, sessions);
     assert.throws(() => assertApplicationSuitability(application, { NODE_ENV: "production" }), /ADAPTER_NOT_PRODUCTION_SUITABLE/);
-    assert.deepEqual(application.graph.relations, [{ relation: "public.projects", owner: "projects", repository: "projects", exclusive: true }]);
+    assert.deepEqual(application.graph.relations, [
+      { relation: "public.project_invitations", owner: "projects", repository: "invitations", exclusive: true },
+      { relation: "public.projects", owner: "projects", repository: "projects", exclusive: true },
+    ]);
     assert.ok(application.graph.entrypoints.worker?.bindings.every(({ target }) =>
       application.graph.consumers.some(({ definition }) => definition === target),
     ));
@@ -96,9 +106,12 @@ describe("production-shaped full-stack reference", () => {
     const database = await createTestDatabase<ReferenceDatabase>(testDatabaseUrl ?? "", { rls: postgresRlsHooks() });
     try {
       await migrateToLatest(database.db, referenceMigrations);
-      assert.deepEqual(await resolveDeclaredRelationNames(database.db, application.graph.relations.map(({ relation }) => relation)), [{ relation: "public.projects", resolved: true, resolvedAs: "projects" }]);
+      assert.deepEqual(await resolveDeclaredRelationNames(database.db, application.graph.relations.map(({ relation }) => relation)), [
+        { relation: "public.project_invitations", resolved: true, resolvedAs: "project_invitations" },
+        { relation: "public.projects", resolved: true, resolvedAs: "projects" },
+      ]);
       const bindings = createHttpBindings({ database: () => database });
-      const testApplication = createReferenceApplication([bindings.signIn, bindings.createProject]);
+      const testApplication = createReferenceApplication(Object.values(bindings));
       const { sessionCookie, csrfCookie } = await signIn(testApplication.graph);
       const csrf = csrfCookie.slice(csrfCookie.indexOf("=") + 1);
       const createProject = nextRouteFor(testApplication.graph, "/api/projects", "POST");

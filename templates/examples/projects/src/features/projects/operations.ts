@@ -1,16 +1,8 @@
-import { action, object, string, type OwnedEventDefinition, type ExecutionContext } from "typescript-on-rails";
+import { action, object, string } from "typescript-on-rails";
 
 import { ProjectCreated } from "./events.js";
 import { Project } from "./model.js";
-import type { ProjectRepository } from "./repository.js";
-
-interface ProjectCommandContext extends ExecutionContext {
-  readonly tenantId: string;
-  readonly projects: ProjectRepository;
-  readonly outbox: {
-    appendOutbox<T>(event: OwnedEventDefinition<T>, payload: T, idempotencyKey: string): Promise<unknown>;
-  };
-}
+import type { ProjectCommandContext } from "./context.js";
 
 export const createProject = action({
   input: object({ id: string(), name: string() }),

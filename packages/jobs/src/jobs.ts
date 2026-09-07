@@ -35,6 +35,9 @@ export interface JobRecord {
   readonly outboxId?: string;
   readonly consumerId?: string;
   readonly replayGeneration?: number;
+  /** Version of the materialized payload, not the historical envelope. */
+  readonly payloadVersion?: number;
+  readonly scheduleId?: string;
   readonly leaseToken?: string;
   readonly leaseExpiresAt?: Date;
   readonly lastErrorCode?: string;
@@ -181,7 +184,7 @@ export interface JobStore {
   deadLetters(): Promise<readonly JobRecord[]>;
 }
 
-export interface JobHandlerContext { readonly jobId: string; readonly attempt: number; readonly signal: AbortSignal; effect<T>(key: string, run: () => Promise<{ readonly value: T; readonly providerReference?: string }>, reconcile?: () => Promise<{ readonly state: "succeeded" | "missing"; readonly value?: T; readonly providerReference?: string }>): Promise<T> }
+export interface JobHandlerContext { readonly delivery?: Readonly<Pick<JobRecord, "name" | "consumerId" | "outboxId" | "payloadVersion" | "scheduleId">>; readonly jobId: string; readonly attempt: number; readonly signal: AbortSignal; effect<T>(key: string, run: () => Promise<{ readonly value: T; readonly providerReference?: string }>, reconcile?: () => Promise<{ readonly state: "succeeded" | "missing"; readonly value?: T; readonly providerReference?: string }>): Promise<T> }
 export type JobHandler = (payload: unknown, context: JobHandlerContext) => Promise<void> | void;
 
 export interface WorkerOptions {
@@ -258,6 +261,7 @@ export function createWorker(options: WorkerOptions) {
       })();
       const context: JobHandlerContext = {
         jobId: job.id,
+        delivery: Object.freeze({ name: job.name, ...(job.consumerId === undefined ? {} : { consumerId: job.consumerId }), ...(job.outboxId === undefined ? {} : { outboxId: job.outboxId }), ...(job.payloadVersion === undefined ? {} : { payloadVersion: job.payloadVersion }), ...(job.scheduleId === undefined ? {} : { scheduleId: job.scheduleId }) }),
         attempt: job.attempts,
         signal: handlerController.signal,
         async effect<T>(
@@ -328,7 +332,7 @@ export function createWorker(options: WorkerOptions) {
         if (!(await options.store.complete(job.id, leaseToken))) throw new Error("JOB_FENCE_LOST");
         return "succeeded";
       } catch (error) {
-        const dead = job.attempts >= job.maximumAttempts;
+        const dead = job.attempts >= job.maximumAttempts || (typeof error === "object" && error !== null && "permanent" in error && error.permanent === true);
         const delay = baseBackoff * 2 ** Math.max(0, job.attempts - 1);
         const availableAt = new Date(now().getTime() + delay);
         if (!(await options.store.fail(job.id, leaseToken, { errorCode: safeErrorCode(error), availableAt, dead }))) throw new Error("JOB_FENCE_LOST");
@@ -386,7 +390,7 @@ export function memoryJobStore(
   const jobKeys = new Map<string, { readonly id: string; readonly digest: string }>();
   const outbox = new Map<string, OutboxRecord>();
   const outboxKeys = new Map<string, { readonly id: string; readonly digest: string }>();
-  const occurrences = new Map<string, { readonly id: string; readonly digest: string }>();
+  const occurrences = new Map<string, { readonly id: string; readonly digest: string; readonly schedule: string }>();
   const effects = new Map<string, EffectReceipt>();
   const receipts = new Map<string, Map<string, Map<number, OutboxDeliveryReceipt>>>();
   const history = new Map<string, OutboxHistoryEntry[]>();
@@ -541,7 +545,13 @@ export function memoryJobStore(
       const leaseToken = randomUUID();
       const claimed = Object.freeze({ ...candidate, status: "running" as const, attempts: candidate.attempts + 1, leaseToken, leaseExpiresAt: new Date(at.getTime() + leaseMilliseconds) });
       jobs.set(candidate.id, claimed);
-      return jobSnapshot(claimed);
+      const delivery = candidate.outboxId === undefined || candidate.consumerId === undefined ? undefined
+        : receipts.get(candidate.outboxId)?.get(candidate.consumerId)?.get(candidate.replayGeneration ?? 0);
+      const payloadVersion = delivery?.state === "succeeded" && delivery.jobId === candidate.id ? delivery.consumerVersion : undefined;
+      const schedules = [...occurrences.values()].filter(({ id }) => id === candidate.id);
+      if (schedules.length > 1) return jobSnapshot(claimed);
+      const schedule = schedules[0];
+      return jobSnapshot({ ...claimed, ...(payloadVersion === undefined ? {} : { payloadVersion }), ...(schedule === undefined ? {} : { scheduleId: schedule.schedule }) });
     },
     async renew(id, leaseToken, leaseMilliseconds) {
       const current = jobs.get(id);
@@ -774,7 +784,7 @@ export function memoryJobStore(
         return { id: prior.id, replayed: true };
       }
       const result = await this.enqueue(input.job);
-      occurrences.set(key, { id: result.id, digest });
+      occurrences.set(key, { id: result.id, digest, schedule: input.schedule });
       return result;
     },
     async transitionEffect(input) {

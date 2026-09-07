@@ -1,13 +1,14 @@
-import { bindRoute, cookie, requestCookie, type BoundRoute } from "@typescript-on-rails/web";
+import { bindRoute, cookie, requestCookie, type HttpInput } from "@typescript-on-rails/web";
 import { withPostgresRequestUnitOfWork, type RequestTransactionScope } from "@typescript-on-rails/jobs";
 import { Unauthorized } from "typescript-on-rails";
 
 import { sessionRoute } from "../features/access/index.js";
-import { createProjectRoute } from "../features/projects/index.js";
+import { acceptProjectInvitationRoute, createProjectInvitationRoute, createProjectRoute, type ProjectCommandContext } from "../features/projects/index.js";
 import type { ReferenceDatabase } from "./database.js";
 import { referenceDatabase } from "./database.js";
 import { postgresProjectRepository } from "./project-repository.js";
-import { identity, sessions } from "./runtime.js";
+import { postgresInvitationRepository } from "./invitation-repository.js";
+import { identity, localPrincipal, sessions } from "./runtime.js";
 
 const origin = "https://localhost:3420";
 const sessionCookie = "__Host-tor-session";
@@ -24,6 +25,7 @@ function configuredDatabase(): ReturnType<typeof referenceDatabase> {
 
 export function createHttpBindings(options: {
   readonly database?: () => RequestTransactionScope<ReferenceDatabase>;
+  readonly now?: () => Date;
 } = {}) {
   const database = options.database ?? configuredDatabase;
   const signIn = bindRoute(sessionRoute, {
@@ -41,31 +43,37 @@ export function createHttpBindings(options: {
       return Response.json({ signedIn: true }, { headers });
     },
   });
-  const createProject = bindRoute(createProjectRoute, {
+  // All three project mutations share the same trusted session and transaction.
+  const authenticated = {
     mutation: {
       trustedOrigins: [origin],
       csrf: { cookie: csrfCookie, header: "x-csrf-token" },
     },
-    async scope(input, execute) {
+    async scope<TResult>(input: HttpInput, execute: (context: ProjectCommandContext) => Promise<TResult>) {
       const token = requestCookie(input.request, sessionCookie);
       const session = token === undefined ? undefined : await sessions.read(token, new Date());
       if (session === undefined) throw new Unauthorized();
+      const principal = await localPrincipal(session.actorId);
       const requestId = input.request.headers.get("x-request-id") ?? crypto.randomUUID();
       return withPostgresRequestUnitOfWork(
         database(),
-        { tenantId: "tenant_local", actorId: session.actorId, requestId },
+        { tenantId: principal.tenantId, actorId: principal.actorId, requestId },
         (unit) => execute({
-          permissions: new Set(["project.create", "project.read"]),
-          tenantId: unit.tenantId,
+          ...principal,
+          now: options.now?.() ?? new Date(),
           projects: postgresProjectRepository(unit.transaction),
+          invitations: postgresInvitationRepository(unit.transaction),
           outbox: unit.outbox,
         }),
       );
     },
+  };
+  return Object.freeze({
+    signIn,
+    createProject: bindRoute(createProjectRoute, authenticated),
+    createProjectInvitation: bindRoute(createProjectInvitationRoute, authenticated),
+    acceptProjectInvitation: bindRoute(acceptProjectInvitationRoute, authenticated),
   });
-  return Object.freeze({ signIn, createProject });
 }
 
-const bindings = createHttpBindings();
-export const signInHttpRoute: BoundRoute = bindings.signIn;
-export const createProjectHttpRoute: BoundRoute = bindings.createProject;
+export const httpBindings = createHttpBindings();

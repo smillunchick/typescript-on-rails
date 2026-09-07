@@ -513,7 +513,20 @@ export function postgresJobStore<DB>(db: Kysely<DB>): JobStore {
         `.execute(transaction);
         const claimed = updated.rows[0];
         if (claimed === undefined) throw new Error("JOB_CLAIM_LOST");
-        return job(claimed);
+        // Replay receipts may point to the same job with a newer consumer version.
+        // Only the receipt from the job's original generation describes its payload.
+        const delivery = await sql<{ consumer_version: number | null; schedule: string | null }>`
+          select receipt.consumer_version, occurrence.schedule
+          from tor_jobs as job
+          left join tor_outbox_delivery_receipts as receipt
+            on receipt.job_id = job.id and receipt.outbox_id = job.outbox_id
+            and receipt.consumer_id = job.consumer_id and receipt.replay_generation = job.replay_generation
+            and receipt.state = 'succeeded'
+          left join tor_schedule_occurrences as occurrence on occurrence.job_id = job.id
+          where job.id = ${claimed.id}
+        `.execute(transaction);
+        const metadata = delivery.rows.length === 1 ? delivery.rows[0] : undefined;
+        return Object.freeze({ ...job(claimed), ...(metadata?.consumer_version == null ? {} : { payloadVersion: metadata.consumer_version }), ...(metadata?.schedule == null ? {} : { scheduleId: metadata.schedule }) });
       });
     },
 

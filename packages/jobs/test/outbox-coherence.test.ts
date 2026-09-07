@@ -147,15 +147,15 @@ describe("coherent durable outbox", () => {
     assert.equal(handled, 0);
   });
 
-  it("rejects competing or non-adjacent upcasters at construction", () => {
+  it("rejects non-adjacent upcasters at construction and isolates competing edges", () => {
     const Changed = event({ owner: "upcast-validation", name: "Changed", version: 2, payload: object({ id: string() }) });
     const target = consumer({ name: "changed", event: Changed, durable: true, handle: () => undefined });
     const feature = defineFeature({ name: "upcast-validation", events: [Changed], consumers: [target] });
     assert.throws(() => createConsumerRuntime([feature], { upcasters: [{ event: Changed, from: 1, to: 3, upcast: (value) => value }] }), /UPCASTER_MUST_BE_ADJACENT/);
-    assert.throws(() => createConsumerRuntime([feature], { upcasters: [
+    assert.doesNotThrow(() => createConsumerRuntime([feature], { upcasters: [
       { event: Changed, from: 1, to: 2, upcast: (value) => value },
       { event: Changed, from: 1, to: 2, upcast: (value) => value },
-    ] }), /DUPLICATE_UPCASTER_EDGE/);
+    ] }));
   });
 
   it("fails closed for every unsupported or malformed historic payload", async () => {

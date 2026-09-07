@@ -335,11 +335,15 @@ describe("durable work runtime", () => {
     assert.equal(await createWorker({ store, handlers: runtime.handlers, now: () => new Date(0) }).runOnce(new AbortController().signal), "succeeded");
     assert.deepEqual(received, ["one"]);
     const Tick = event({ owner: "reviews", name: "Tick", payload: unit() });
-    const tickTarget = consumer({ name: "tick", event: Tick, durable: true, handle: () => undefined });
+    let ticks = 0;
+    const tickTarget = consumer({ name: "tick", event: Tick, durable: true, handle: () => { ticks += 1; } });
     const tick = schedule({ name: "tick", feature: "reviews", target: tickTarget, occurrences: (now) => [{ occurrence: "one", payload: undefined, dueAt: now }] });
     const tickStore = memoryJobStore(() => new Date(0));
     assert.equal((await runScheduler(tickStore, [tick], new Date(0))).created, 1);
     assert.equal((await runScheduler(tickStore, [tick], new Date(1_000))).replayed, 1);
+    const tickRuntime = createConsumerRuntime([defineFeature({ name: "reviews", events: [Tick], consumers: [tickTarget], schedules: [tick] })]);
+    assert.equal(await createWorker({ store: tickStore, handlers: tickRuntime.handlers, now: () => new Date(0) }).runOnce(new AbortController().signal), "succeeded");
+    assert.equal(ticks, 1);
   });
 
   it("materializes one generic schedule occurrence and dispatches outbox records once", async () => {

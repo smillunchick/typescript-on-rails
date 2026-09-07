@@ -14,6 +14,7 @@ import type {
   OutboxRecord,
 } from "./jobs.js";
 import type { OutboxPublisher } from "./runtime.js";
+import { samePersistedJson } from "./identity.js";
 
 export interface DurableConsumerContext<TApplication> {
   readonly application: TApplication;
@@ -84,8 +85,8 @@ function authorityEnvelope(envelope: DurableEnvelope): DurableAuthorityEnvelope 
   });
 }
 
-function handlerPayload(value: unknown): { readonly envelope: DurableEnvelope; readonly payload: unknown } {
-  if (typeof value !== "object" || value === null || !("envelope" in value) || !("payload" in value)) {
+function handlerPayload(value: unknown): { readonly envelope: DurableEnvelope; readonly payload: unknown; readonly payloadVersion: unknown } {
+  if (typeof value !== "object" || value === null || !("envelope" in value)) {
     throw permanent("DURABLE_HANDLER_PAYLOAD_INVALID");
   }
   const raw = value.envelope;
@@ -122,7 +123,7 @@ function handlerPayload(value: unknown): { readonly envelope: DurableEnvelope; r
     correlationId: requiredText("correlationId"),
     ...(causationId === undefined ? {} : { causationId }),
   });
-  return Object.freeze({ envelope, payload: value.payload });
+  return Object.freeze({ envelope, payload: Reflect.get(value, "payload"), payloadVersion: Reflect.get(value, "payloadVersion") });
 }
 
 export function createConsumerRuntime<TApplication = unknown>(
@@ -162,15 +163,40 @@ export function createConsumerRuntime<TApplication = unknown>(
   }
   registered.sort((left, right) => left.job.localeCompare(right.job));
 
-  const upcasters = new Map<string, Map<number, DurableUpcaster>>();
+  const upcasters = new Map<string, Map<number, DurableUpcaster | null>>();
   for (const item of options.upcasters ?? []) {
     if (!Number.isSafeInteger(item.from) || item.from < 1 || item.to !== item.from + 1) {
       throw new TypeError(`UPCASTER_MUST_BE_ADJACENT:${item.event.id}:${item.from}:${item.to}`);
     }
-    const eventUpcasters = upcasters.get(item.event.id) ?? new Map<number, DurableUpcaster>();
-    if (eventUpcasters.has(item.from)) throw new TypeError(`DUPLICATE_UPCASTER_EDGE:${item.event.id}:${item.from}`);
-    eventUpcasters.set(item.from, item);
+    const eventUpcasters = upcasters.get(item.event.id) ?? new Map<number, DurableUpcaster | null>();
+    eventUpcasters.set(item.from, eventUpcasters.has(item.from) ? null : item);
     upcasters.set(item.event.id, eventUpcasters);
+  }
+
+  function currentPayload(item: RegisteredConsumer, value: unknown, from: number): unknown {
+    if (!Number.isSafeInteger(from) || from < 1) throw permanent("EVENT_PAYLOAD_VERSION_INVALID");
+    if (from > item.consumer.event.version) throw permanent("EVENT_VERSION_FROM_FUTURE");
+    let payload: unknown;
+    try {
+      payload = structuredClone(value);
+    } catch (error) {
+      throw permanent("EVENT_PAYLOAD_NOT_CLONEABLE", error);
+    }
+    for (let version = from; version < item.consumer.event.version; version += 1) {
+      const upcaster = upcasters.get(item.eventId)?.get(version);
+      if (upcaster === undefined) throw permanent("EVENT_UPCASTER_MISSING");
+      if (upcaster === null) throw permanent("EVENT_UPCASTER_AMBIGUOUS");
+      try {
+        payload = upcaster.upcast(payload);
+      } catch (error) {
+        throw permanent("EVENT_UPCAST_FAILED", error);
+      }
+    }
+    try {
+      return item.consumer.event.parse(payload);
+    } catch (error) {
+      throw permanent("EVENT_PAYLOAD_INVALID", error);
+    }
   }
 
   const jobs = new Set<string>();
@@ -189,12 +215,37 @@ export function createConsumerRuntime<TApplication = unknown>(
     byEvent.set(item.eventId, eventConsumers);
     handlers[item.job] = async (value, job) => {
       const durable = handlerPayload(value);
+      const delivery = job.delivery;
+      if (durable.envelope.eventId !== item.eventId || durable.envelope.eventName !== item.consumer.event.name) {
+        throw permanent("DURABLE_EVENT_IDENTITY_MISMATCH");
+      }
+      if (delivery?.name !== item.job || (delivery.consumerId !== undefined && delivery.consumerId !== item.consumerId)) {
+        throw permanent("DURABLE_CONSUMER_IDENTITY_MISMATCH");
+      }
+      let payloadVersion = delivery.payloadVersion;
+      if (delivery.outboxId !== undefined) {
+        if (delivery.consumerId !== item.consumerId || delivery.outboxId !== durable.envelope.occurrenceId || delivery.scheduleId !== undefined) {
+          throw permanent("DURABLE_CONSUMER_IDENTITY_MISMATCH");
+        }
+      } else if (delivery.scheduleId !== undefined) {
+        // Old schedules stored both copies at envelope.schemaVersion, with identity
+        // established by the persisted schedule link and exact claimed job name.
+        if (!samePersistedJson(durable.payload, durable.envelope.payload)) {
+          throw permanent("EVENT_PAYLOAD_VERSION_INVALID");
+        }
+        payloadVersion = durable.envelope.schemaVersion;
+      } else {
+        throw permanent("EVENT_PAYLOAD_VERSION_INVALID");
+      }
+      if (payloadVersion === undefined || payloadVersion < durable.envelope.schemaVersion ||
+          (durable.payloadVersion !== undefined && durable.payloadVersion !== payloadVersion)) throw permanent("EVENT_PAYLOAD_VERSION_INVALID");
+      const payload = currentPayload(item, durable.payload, payloadVersion);
       const input = Object.freeze({ envelope: authorityEnvelope(durable.envelope), attempt: job.attempt });
       const registration = Object.freeze({ feature: item.feature, name: item.consumer.metadata.name, consumerId: item.consumerId });
       await options.authorize?.(input, registration);
       const application = await options.context?.(input, registration) as TApplication;
       const context: DurableConsumerContext<TApplication> = Object.freeze({ application, job });
-      await item.consumer.handle(item.consumer.event.parse(durable.payload), context);
+      await item.consumer.handle(payload, context);
     };
     bindings.push(runtimeBinding({ name: item.job, protocol: "jobs.consumer/v1", process: "worker", target: item.consumer }));
   }
@@ -211,27 +262,8 @@ export function createConsumerRuntime<TApplication = unknown>(
           for (const item of eventConsumers) {
             const targetVersion = item.consumer.event.version;
             try {
-              if (record.schemaVersion > targetVersion) throw permanent("EVENT_VERSION_FROM_FUTURE");
-              let payload: unknown;
-              try {
-                payload = structuredClone(record.payload);
-              } catch (error) {
-                throw permanent("EVENT_PAYLOAD_NOT_CLONEABLE", error);
-              }
-              for (let version = record.schemaVersion; version < targetVersion; version += 1) {
-                const upcaster = upcasters.get(record.eventId)?.get(version);
-                if (upcaster === undefined) throw permanent("EVENT_UPCASTER_MISSING");
-                try {
-                  payload = upcaster.upcast(payload);
-                } catch (error) {
-                  throw permanent("EVENT_UPCAST_FAILED", error);
-                }
-              }
-              try {
-                payload = item.consumer.event.parse(payload);
-              } catch (error) {
-                throw permanent("EVENT_PAYLOAD_INVALID", error);
-              }
+              if (record.eventName !== item.consumer.event.name) throw permanent("DURABLE_EVENT_IDENTITY_MISMATCH");
+              const payload = currentPayload(item, record.payload, record.schemaVersion);
               const envelope: DurableEnvelope = Object.freeze({
                 ...authorityEnvelope(record),
                 payload: record.payload,

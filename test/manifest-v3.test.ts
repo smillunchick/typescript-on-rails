@@ -6,6 +6,9 @@ import {
   analyzeApplicationV3,
   defineApp,
   defineFeature,
+  defineRepository,
+  consumer,
+  schedule,
   defineModel,
   diffArchitectureV3,
   emailContract,
@@ -97,10 +100,17 @@ describe("Manifest v3 executable application graph", () => {
         'export const inspect = action({ input: object({}), public: true, run: (_input, context: Context) => {',
         '  const alias = context.outbox;',
         '  alias.append({});',
+        '  const { nested: nestedAlias } = context;',
+        '  const { run: execute } = nestedAlias;',
+        '  execute();',
+        '  const shadow = (context: { dead: { run(): void } }) => context.dead.run();',
         '  context["email"].send();',
         '  const contextCache = { send() {} };',
         '  contextCache["send"]();',
         '  const helper = () => context.nested.run();',
+        '  const delayed = () => late.send();',
+        '  const late = context.email;',
+        '  delayed();',
         '  if (false) context.dead.run();',
         '  helper();',
         '  return true;',
@@ -115,12 +125,134 @@ describe("Manifest v3 executable application graph", () => {
       assert.equal(detail?.contextObservationResolution, "resolved");
       const observations = detail?.contextObservations as readonly { readonly member: string; readonly state: string; readonly scope: string; readonly runtimeReachability: string }[];
       assert.deepEqual(observations.map(({ member, state, scope, runtimeReachability }) => ({ member, state, scope, runtimeReachability })), [
-        { member: "context.outbox", state: "alias-unresolved", scope: "run-body", runtimeReachability: "unknown" },
+        { member: "context.outbox.append", state: "direct", scope: "run-body", runtimeReachability: "unknown" },
+        { member: "context.nested.run", state: "direct", scope: "run-body", runtimeReachability: "unknown" },
         { member: "context[computed].send", state: "computed-unresolved", scope: "run-body", runtimeReachability: "unknown" },
         { member: "context.nested.run", state: "direct", scope: "nested-function", runtimeReachability: "unknown" },
+        { member: "context.email.send", state: "direct", scope: "nested-function", runtimeReachability: "unknown" },
         { member: "context.dead.run", state: "direct", scope: "run-body", runtimeReachability: "unknown" },
       ]);
       assert.deepEqual(manifest.linkage.links, []);
+    } finally { await fixture.cleanup(); }
+  });
+
+  it("keeps same-local-name provenance separate by owner and resolves framework symbols", async () => {
+    const files: Record<string, string> = {
+      "src/app.ts": 'import { defineApp } from "typescript-on-rails"; import { feature as billing } from "./features/billing/index.js"; import { feature as shipping } from "./features/shipping/index.js"; export const application = defineApp({ features: [billing, shipping] });\n',
+      "src/factories.ts": 'export { consumer as consume, defineRepository as repository, schedule as recurring } from "typescript-on-rails";\n',
+      "src/unrelated.ts": 'function consumer(value: unknown) { return value; } consumer({ name: "target" });\n',
+    };
+    const features = ["billing", "shipping"].map((owner) => {
+      files[`src/features/${owner}/index.ts`] = [
+        'import * as factories from "../../factories.js";',
+        'import { defineFeature, event, object } from "typescript-on-rails";',
+        `const Due = event({ owner: "${owner}", name: "Due", payload: object({}) });`,
+        'export const target = factories.consume({ name: "target", event: Due, durable: true, handle: () => undefined });',
+        `export const records = factories.repository({ name: "records", feature: "${owner}", relations: ["${owner}.records"] });`,
+        `export const daily = factories.recurring({ name: "daily", feature: "${owner}", target, occurrences: () => [] });`,
+        `export const feature = defineFeature({ name: "${owner}", consumers: [target], repositories: [records], schedules: [daily] });`,
+      ].join("\n");
+      const Due = event({ owner, name: "Due", payload: object({}) });
+      const target = consumer({ name: "target", event: Due, durable: true, handle: () => undefined });
+      return defineFeature({ name: owner, events: [Due], consumers: [target],
+        repositories: [defineRepository({ name: "records", feature: owner, relations: [`${owner}.records`] })],
+        schedules: [schedule({ name: "daily", feature: owner, target, occurrences: () => [] })] });
+    });
+    const fixture = await createAppFixture(files);
+    try {
+      const application = defineApp({ features });
+      const manifest = analyzeApplicationV3(fixture.root, { application });
+      for (const record of manifest.composition.filter(({ kind }) => ["consumer", "repository", "schedule"].includes(kind))) {
+        assert.deepEqual(record.detail?.source, { file: `src/features/${record.owner}/index.ts`, line: record.kind === "consumer" ? 4 : record.kind === "repository" ? 5 : 6, provenance: "static-registration" });
+      }
+      assert.deepEqual(manifest.linkage.links, application.graph.links);
+      assert.ok(!manifest.completeness.observations.some(({ kind }) => /^(consumer|repository|schedule)-source$/.test(kind)));
+      for (const owner of ["billing", "shipping"]) {
+        const file = `src/features/${owner}/index.ts`;
+        await fixture.write(file, files[file]!.replace('import * as factories from "../../factories.js";', 'import { consumer, defineRepository, schedule } from "typescript-on-rails";').replace("factories.consume", "consumer").replace("factories.repository", "defineRepository").replace("factories.recurring", "schedule"));
+      }
+      const direct = analyzeApplicationV3(fixture.root, { application });
+      assert.deepEqual(direct.composition, manifest.composition);
+      await fixture.write("src/features/billing/duplicate.ts", 'import { consumer as other } from "typescript-on-rails"; other({ name: "target", event: undefined as never, handle: () => undefined });\n');
+      const duplicate = analyzeApplicationV3(fixture.root, { application });
+      assert.deepEqual(duplicate.composition, manifest.composition);
+      assert.ok(!duplicate.completeness.observations.some(({ kind }) => kind === "consumer-source"));
+      assert.ok(duplicate.composition.find(({ kind, owner }) => kind === "consumer" && owner === "shipping")?.detail?.source);
+    } finally { await fixture.cleanup(); }
+  });
+
+  it("leaves unsupported registration sources unknown instead of trusting type assertions or factory names", async () => {
+    const fixture = await createAppFixture({
+      "src/app.ts": 'import { defineApp } from "typescript-on-rails"; import { feature } from "./features/billing/index.js"; export const application = defineApp({ features: [feature] });\n',
+      "src/features/billing/index.ts": [
+        'import { defineFeature, consumer as realConsumer, event, object } from "typescript-on-rails";',
+        'const Due = event({ name: "Due", payload: object({}) });',
+        'declare const dynamicName: string;',
+        'const dynamic = realConsumer({ name: dynamicName as "dynamic", event: Due, handle: () => undefined });',
+        'const consumer = (value: unknown) => value;',
+        'const unrelated = consumer({ name: "unrelated", event: Due, handle: () => undefined });',
+        'function wrap(consumer: typeof realConsumer) { return consumer({ name: "shadowed", event: Due, handle: () => undefined }); }',
+        'realConsumer({ name: "", event: Due, handle: () => undefined });',
+        'const shadowed = wrap(realConsumer); export const feature = defineFeature({ name: "billing", consumers: [dynamic, unrelated, shadowed] });',
+      ].join("\n"),
+    });
+    try {
+      const Due = event({ name: "Due", payload: object({}) });
+      const application = defineApp({ features: [defineFeature({ name: "billing", events: [Due], consumers: ["dynamic", "unrelated", "shadowed"].map((name) => consumer({ name, event: Due, handle: () => undefined })) })] });
+      const manifest = analyzeApplicationV3(fixture.root, { application });
+      assert.ok(manifest.composition.filter(({ kind }) => kind === "consumer").every(({ detail }) => detail?.source === undefined));
+      assert.deepEqual(manifest.completeness.observations.filter(({ kind }) => kind === "consumer-source").map(({ name, reason }) => ({ name, reason })), ["dynamic", "shadowed", "unrelated"].map((name) => ({ name: `billing.${name}`, reason: "no supported framework registration resolves to this owner and name" })));
+    } finally { await fixture.cleanup(); }
+  });
+
+  it("resolves destructured context parameters and const aliases by symbol, not same-line or shadow names", async () => {
+    const fixture = await createAppFixture({
+      "src/features/observe/index.ts": [
+        'import { action, object, type ExecutionContext } from "typescript-on-rails";',
+        'interface Context extends ExecutionContext { email: { send(): void }; outbox: { append(): void } }',
+        'export const first = action({ input: object({}), public: true, run: (_input, { email: { send } }: Context) => { const invoke = send; invoke(); const shadow = (send: () => void) => send(); return true; } }); export const second = action({ input: object({}), public: true, run: (_input, ctx: Context) => { ctx.outbox.append(); return true; } });',
+        'export const mutable = action({ input: object({}), public: true, run: (_input, ctx: Context) => { let alias = ctx.email; alias.send(); return true; } });',
+      ].join("\n"),
+    });
+    try {
+      const operation = () => action({ input: object({}), public: true, run: () => true });
+      const application = defineApp({ features: [defineFeature({ name: "observe", operations: { first: operation(), second: operation(), mutable: operation() } })] });
+      const manifest = analyzeApplicationV3(fixture.root, { application });
+      const detail = (name: string) => manifest.composition.find((record) => record.kind === "operation" && record.name === name)?.detail;
+      assert.deepEqual((detail("first")?.contextObservations as { member: string }[]).map(({ member }) => member), ["context.email.send"]);
+      assert.deepEqual((detail("second")?.contextObservations as { member: string }[]).map(({ member }) => member), ["ctx.outbox.append"]);
+      assert.equal(detail("mutable")?.contextObservationResolution, "context-unresolved");
+      assert.deepEqual((detail("mutable")?.contextObservations as { member: string; state: string }[]).map(({ member, state }) => ({ member, state })), [{ member: "ctx.email", state: "alias-unresolved" }]);
+    } finally { await fixture.cleanup(); }
+  });
+
+  it("discovers explicit host exports and paths without inventing automatic methods", async () => {
+    const fixture = await createAppFixture({
+      "src/handlers.ts": 'export function handle() { return new Response("ok"); }\n',
+      "src/methods.ts": 'export { handle as GET, handle as HEAD, handle as OPTIONS } from "./handlers.js";\n',
+      "src/app/(group)/api/[id]/route.ts": 'export { handle as GET, handle as HEAD } from "../../../../handlers.js";\n',
+      "src/app/@slot/items/[...parts]/route.ts": 'export * from "../../../../methods.js";\n',
+      "src/app/const/route.ts": 'export const { GET, OPTIONS } = { GET: () => new Response(null), OPTIONS: () => new Response(null) };\n',
+      "src/app/ordinary/route.ts": 'export function GET() { return new Response(null); } export type { handle as HEAD } from "../../handlers.js"; export type * from "../../methods.js";\n',
+      "src/app/[[...optional]]/route.ts": 'export function GET() { return new Response(null); }\n',
+      "src/app/(..)intercepted/route.ts": 'export function GET() { return new Response(null); }\n',
+      "src/app/_private/route.ts": 'export function HEAD() { return new Response(null); }\n',
+      "src/features/example/route.ts": 'export function HEAD() { return new Response(null); }\n',
+      "src/app/unresolved/route.ts": 'export const GET: unknown = undefined; export * from "./missing.js";\n',
+    });
+    try {
+      const manifest = analyzeApplicationV3(fixture.root);
+      const routes = manifest.completeness.observations.filter(({ category, kind }) => category === "discovered-undeclared" && kind === "route");
+      assert.deepEqual(routes.map(({ name }) => name), ["GET /api/:id", "GET /const", "GET /items/:parts*", "GET /ordinary", "GET /unresolved", "HEAD /api/:id", "HEAD /items/:parts*", "OPTIONS /const", "OPTIONS /items/:parts*"]);
+      assert.equal(manifest.completeness.observations.filter(({ kind }) => kind === "route-path").length, 2);
+      assert.deepEqual(manifest.completeness.observations.filter(({ kind }) => kind === "route-export").map(({ reason }) => reason), ["GET export does not resolve to a callable handler", 'cannot resolve route re-export "./missing.js"']);
+      await fixture.write("app/root/route.ts", 'export function OPTIONS() { return new Response(null); }\n');
+      const rootHost = analyzeApplicationV3(fixture.root);
+      assert.ok(!rootHost.completeness.observations.some(({ file }) => file?.startsWith("src/app/")));
+      assert.ok(rootHost.completeness.observations.some(({ kind, file, reason }) => kind === "route-export" && file === "app/root/route.ts" && /not in the TypeScript program/.test(reason)));
+      await fixture.write("tsconfig.json", JSON.stringify({ compilerOptions: { strict: true, target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext" }, include: ["app/**/*.ts"] }));
+      const resolvedRoot = analyzeApplicationV3(fixture.root);
+      assert.deepEqual(resolvedRoot.completeness.observations.filter(({ kind }) => kind === "route").map(({ name }) => name), ["OPTIONS /root"]);
     } finally { await fixture.cleanup(); }
   });
 
