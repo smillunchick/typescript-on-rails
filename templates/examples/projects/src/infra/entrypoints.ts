@@ -7,14 +7,20 @@ import {
   runScheduler,
   scheduleRuntimeBinding,
 } from "@typescript-on-rails/jobs";
-import { entrypoint, type RuntimeBinding } from "typescript-on-rails";
+import { entrypoint, Forbidden, type RuntimeBinding } from "typescript-on-rails";
 
-import { dailyProjectCheck, projectsFeature } from "../features/projects/index.js";
+import { dailyProjectCheck, invitationUpcasters, projectsFeature } from "../features/projects/index.js";
 import { referenceDatabase } from "./database.js";
-import { createProjectHttpRoute, signInHttpRoute } from "./http.js";
-import { email } from "./runtime.js";
+import { httpBindings } from "./http.js";
+import { email, localPrincipal } from "./runtime.js";
 
 export const consumers = createConsumerRuntime([projectsFeature], {
+  upcasters: invitationUpcasters,
+  async authorize({ envelope }, { name }) {
+    if (name !== "sendProjectInvitation") return;
+    const principal = await localPrincipal(envelope.actorId ?? "");
+    if (principal.tenantId !== envelope.tenantId || !principal.permissions.has("project.create")) throw new Forbidden();
+  },
   context: (_input, { feature }) => {
     if (feature !== "projects") throw new Error(`CONSUMER_CONTEXT_NOT_CONFIGURED:${feature}`);
     return { email };
@@ -84,7 +90,7 @@ export const schedulerEntrypoint = entrypoint({
 });
 
 export function referenceEntrypoints(
-  bindings: readonly RuntimeBinding[] = [signInHttpRoute, createProjectHttpRoute],
+  bindings: readonly RuntimeBinding[] = Object.values(httpBindings),
 ) {
   return Object.freeze({
     web: processEntrypoint({

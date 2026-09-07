@@ -1,7 +1,9 @@
 import type { DurableConsumerContext } from "@typescript-on-rails/jobs";
 import { consumer, defineFeature, emailContract, page, schedule } from "typescript-on-rails";
 
-import { ProjectCheckDue, ProjectCreated } from "./events.js";
+import type { ProjectCommandContext } from "./context.js";
+import { ProjectCheckDue, ProjectCreated, ProjectInvitationCreated } from "./events.js";
+import { acceptProjectInvitation, acceptProjectInvitationRoute, createProjectInvitation, createProjectInvitationRoute, invitationsRepository, ProjectInvitation } from "./invitations.js";
 import { createProjectRoute } from "./http-contract.js";
 import { Project } from "./model.js";
 import { createProject } from "./operations.js";
@@ -13,8 +15,10 @@ interface WelcomeConsumerContext {
   };
 }
 
+export type { ProjectCommandContext } from "./context.js";
 export { Project, type ProjectValue } from "./model.js";
-export { ProjectCheckDue, ProjectCreated } from "./events.js";
+export { ProjectCheckDue, ProjectCreated, ProjectInvitationCreated, ProjectInvitationPayloadV1, invitationUpcasters } from "./events.js";
+export { acceptProjectInvitation, acceptProjectInvitationRoute, createProjectInvitation, createProjectInvitationRoute, invitationsRepository, ProjectInvitation, type InvitationRecord, type InvitationRepository } from "./invitations.js";
 export { createProjectRoute } from "./http-contract.js";
 export { createProject } from "./operations.js";
 export { projectsRepository, type ProjectRepository } from "./repository.js";
@@ -29,6 +33,23 @@ export const sendProjectWelcome = consumer({
       to: "developer@example.test",
       subject: "Project created",
       text: `Project ${projectId} was created.`,
+    });
+  },
+});
+
+export const sendProjectInvitation = consumer({
+  name: "sendProjectInvitation",
+  event: ProjectInvitationCreated,
+  durable: true,
+  async handle({ invitationId, projectId, recipient, acceptance }, context: DurableConsumerContext<WelcomeConsumerContext>) {
+    await context.job.effect(`project-invitation:${invitationId}`, async () => {
+      const result = await context.application.email.send({
+        idempotencyKey: `project-invitation:${invitationId}`,
+        to: recipient.email,
+        subject: "Project invitation",
+        text: `You are invited to project ${projectId}. Accept with token ${acceptance.token} before ${acceptance.expiresAt}.`,
+      });
+      return { value: result };
     });
   },
 });
@@ -57,16 +78,16 @@ export const dailyProjectCheck = schedule({
   },
 });
 
-export const projectsFeature = defineFeature({
+export const projectsFeature = defineFeature<ProjectCommandContext>({
   name: "projects",
-  models: [Project],
-  operations: { createProject },
-  routes: [createProjectRoute],
+  models: [Project, ProjectInvitation],
+  operations: { createProject, createProjectInvitation, acceptProjectInvitation },
+  routes: [createProjectRoute, createProjectInvitationRoute, acceptProjectInvitationRoute],
   pages: [page({ name: "projects", path: "/", runtime: "hybrid" })],
-  permissions: ["project.create", "project.read"],
-  events: [ProjectCreated, ProjectCheckDue],
-  consumers: [sendProjectWelcome, checkProjects],
+  permissions: ["project.create", "project.read", "project.invitation.accept"],
+  events: [ProjectCreated, ProjectCheckDue, ProjectInvitationCreated],
+  consumers: [sendProjectWelcome, checkProjects, sendProjectInvitation],
   adapters: [emailContract],
-  repositories: [projectsRepository],
+  repositories: [projectsRepository, invitationsRepository],
   schedules: [dailyProjectCheck],
 });

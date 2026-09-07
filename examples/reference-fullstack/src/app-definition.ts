@@ -10,7 +10,7 @@ export function createReferenceApplication(bindings?: readonly RuntimeBinding[])
     adapters: { email, identity, session: sessions },
     features: [accessFeature, projectsFeature],
     entrypoints: referenceEntrypoints(bindings),
-    tests: [{ suite: "reference", features: ["access", "projects"], files: ["test/reference.test.ts"] }],
+    tests: [{ suite: "reference", features: ["access", "projects"], files: ["test/reference.test.ts", "test/invitations.test.ts"] }],
   });
 }
 
